@@ -271,3 +271,67 @@ class ApplicationValidationRun(Base):
         nullable=False,
         server_default=func.now()
     )
+
+
+class ApplicationBuild(Base):
+
+    __tablename__ = "application_builds"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    application_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    package_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_packages.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="queued",
+        index=True
+    )
+
+    image_ref: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True
+    )
+
+    build_log: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    started_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    finished_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now()
+    )

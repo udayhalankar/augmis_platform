@@ -1,5 +1,6 @@
 from services.api.app.models.platform import (
     Application,
+    ApplicationBuild,
     ApplicationPackage,
     ApplicationValidationRun,
     ApplicationVersion,
@@ -12,4 +13,5 @@ __all__ = [
     "ApplicationVersion",
     "ApplicationPackage",
     "ApplicationValidationRun",
+    "ApplicationBuild",
 ]

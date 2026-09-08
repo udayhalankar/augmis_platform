@@ -23,9 +23,16 @@ from services.api.app.db.session import get_db
 from services.api.app.models.platform import (
     Application,
     ApplicationPackage,
+    ApplicationBuild,
     ApplicationValidationRun,
     ApplicationVersion,
     Publisher
+)
+from datetime import datetime, timezone
+
+from services.api.app.services.build_engine import (
+    BuildError,
+    build_docker_image
 )
 
 from tools.validate_package import (
@@ -436,3 +443,241 @@ def list_applications(
         }
         for app in applications
     ]
+@router.post(
+    "/application-packages/{package_id}/build",
+    status_code=201
+)
+def build_application_package(
+    package_id: uuid.UUID,
+    db: Session = Depends(get_db)
+):
+
+    package = db.get(
+        ApplicationPackage,
+        package_id
+    )
+
+    if not package:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application package not found"
+        )
+
+    if package.status != "validated":
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Only validated application "
+                "packages can be built."
+            )
+        )
+
+    if not package.application_version_id:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Package is not linked to "
+                "an application version."
+            )
+        )
+
+    version = db.get(
+        ApplicationVersion,
+        package.application_version_id
+    )
+
+    if not version:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application version not found"
+        )
+
+    application = db.get(
+        Application,
+        version.application_id
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found"
+        )
+
+    publisher = db.get(
+        Publisher,
+        application.publisher_id
+    )
+
+    if not publisher:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Publisher not found"
+        )
+
+    image_ref = (
+        f"augmis.local/"
+        f"{publisher.slug}/"
+        f"{application.app_key}:"
+        f"{version.version}"
+    )
+
+    build = ApplicationBuild(
+        application_version_id=version.id,
+        package_id=package.id,
+        status="building",
+        image_ref=image_ref,
+        started_at=datetime.now(
+            timezone.utc
+        )
+    )
+
+    db.add(build)
+
+    db.commit()
+
+    db.refresh(build)
+
+    try:
+
+        result = build_docker_image(
+            package_path=Path(
+                package.stored_path
+            ),
+            manifest=version.manifest,
+            image_ref=image_ref
+        )
+
+    except BuildError as error:
+
+        build.status = "failed"
+
+        build.build_log = str(
+            error
+        )
+
+        build.finished_at = (
+            datetime.now(
+                timezone.utc
+            )
+        )
+
+        version.status = (
+            "build_failed"
+        )
+
+        db.commit()
+
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message":
+                    "Application build failed",
+
+                "buildId":
+                    str(build.id),
+
+                "error":
+                    str(error)
+            }
+        )
+
+    build.status = "ready"
+
+    build.image_ref = result[
+        "image_ref"
+    ]
+
+    build.build_log = result[
+        "log"
+    ]
+
+    build.finished_at = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    version.status = "image_ready"
+
+    db.commit()
+
+    return {
+
+        "status": "IMAGE_READY",
+
+        "build": {
+            "id": str(build.id),
+
+            "status":
+                build.status,
+
+            "imageRef":
+                build.image_ref
+        },
+
+        "application": {
+            "id":
+                str(application.id),
+
+            "name":
+                application.name,
+
+            "appKey":
+                application.app_key
+        },
+
+        "version":
+            version.version
+    }
+
+@router.get(
+    "/builds/{build_id}"
+)
+def get_build(
+    build_id: uuid.UUID,
+    db: Session = Depends(get_db)
+):
+
+    build = db.get(
+        ApplicationBuild,
+        build_id
+    )
+
+    if not build:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Build not found"
+        )
+
+    return {
+
+        "id":
+            str(build.id),
+
+        "applicationVersionId":
+            str(
+                build.application_version_id
+            ),
+
+        "packageId":
+            str(build.package_id),
+
+        "status":
+            build.status,
+
+        "imageRef":
+            build.image_ref,
+
+        "startedAt":
+            build.started_at,
+
+        "finishedAt":
+            build.finished_at
+    }
