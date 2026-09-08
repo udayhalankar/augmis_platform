@@ -1,0 +1,41 @@
+
+apiVersion: apps.augmis.com/v1alpha1
+
+kind: Application
+
+metadata:
+  id: hello-augmis
+  name: Hello AUGMIS
+  version: 1.0.0
+  description: First reference application for the AUGMIS SaaS Platform
+
+runtime:
+  deploymentMode: dedicated
+  buildType: dockerfile
+  context: .
+  dockerfile: Dockerfile
+
+services:
+
+  web:
+    type: web
+    port: 8080
+    public: true
+
+    health:
+      path: /health
+      intervalSeconds: 30
+
+    resources:
+      cpu: "0.25"
+      memory: 256Mi
+
+authentication:
+  type: none
+  required: false
+
+permissions: []
+
+lifecycle:
+  startupTimeoutSeconds: 120
+  rollbackEnabled: true
