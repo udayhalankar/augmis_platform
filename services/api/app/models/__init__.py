@@ -10,6 +10,7 @@ from services.api.app.models.platform import (
     Tenant,
 )
 
+
 from services.api.app.models.iam import (
     Permission,
     PublisherMembership,
@@ -19,6 +20,13 @@ from services.api.app.models.iam import (
     TenantMembership,
     TenantMembershipRole,
     User,
+)
+
+from services.api.app.models.commerce import (
+    ApplicationOffer,
+    OfferEntitlement,
+    SubscriptionEntitlement,
+    TenantSubscription,
 )
 
 __all__ = [
@@ -31,7 +39,10 @@ __all__ = [
     "ApplicationBuild",
     "ApplicationInstance",
     "ApplicationDeployment",
-
+    "ApplicationOffer",
+    "OfferEntitlement",
+    "TenantSubscription",
+    "SubscriptionEntitlement",
     "User",
     "Role",
     "Permission",

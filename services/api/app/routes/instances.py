@@ -5,33 +5,28 @@ import uuid
 
 from datetime import (
     datetime,
-    timezone
+    timezone,
 )
 
 from fastapi import (
     APIRouter,
     Depends,
-    HTTPException
-)
-
-from services.api.app.core.auth import (
-    get_current_user
-)
-
-from services.api.app.models.iam import (
-    User
-)
-
-from services.api.app.services.authorization_service import (
-    AuthorizationError,
-    require_tenant_permission
+    HTTPException,
 )
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from services.api.app.core.auth import (
+    get_current_user,
+)
+
 from services.api.app.db.session import (
-    get_db
+    get_db,
+)
+
+from services.api.app.models.iam import (
+    User,
 )
 
 from services.api.app.models.platform import (
@@ -40,42 +35,51 @@ from services.api.app.models.platform import (
     ApplicationDeployment,
     ApplicationInstance,
     ApplicationVersion,
-    Tenant
+    Tenant,
 )
 
 from services.api.app.schemas.instance import (
-    InstanceDeployRequest
+    InstanceDeployRequest,
+)
+
+from services.api.app.services.authorization_service import (
+    AuthorizationError,
+    require_tenant_permission,
 )
 
 from services.api.app.services.deployment_engine import (
     DeploymentError,
     start_container,
-    stop_container
+    stop_container,
+)
+
+from services.api.app.services.entitlement_service import (
+    EntitlementError,
+    require_active_entitlement,
 )
 
 
 router = APIRouter(
     prefix="/api/v1",
-    tags=["Runtime"]
+    tags=["Runtime"],
 )
 
 
 def safe_name(
-    value: str
+    value: str,
 ) -> str:
-
     value = value.lower()
 
     value = re.sub(
         r"[^a-z0-9-]",
         "-",
-        value
+        value,
     )
 
     value = re.sub(
         r"-+",
         "-",
-        value
+        value,
     )
 
     return value.strip("-")
@@ -83,120 +87,124 @@ def safe_name(
 
 @router.post(
     "/tenants/{tenant_id}/application-versions/{version_id}/deploy",
-    status_code=201
+    status_code=201,
 )
 def deploy_application(
     tenant_id: uuid.UUID,
     version_id: uuid.UUID,
     payload: InstanceDeployRequest,
-
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    )
+    current_user: User = Depends(get_current_user),
 ):
-
     tenant = db.get(
         Tenant,
-        tenant_id
+        tenant_id,
     )
 
     if not tenant:
-
         raise HTTPException(
             status_code=404,
-            detail="Tenant not found"
+            detail="Tenant not found",
         )
 
     if tenant.status != "active":
-
         raise HTTPException(
             status_code=409,
-            detail="Tenant is not active"
+            detail="Tenant is not active",
         )
 
-    version = db.get(
-        ApplicationVersion,
-        version_id
-    )
-
+    # 1. RBAC permission check.
     try:
-
         require_tenant_permission(
             db=db,
             user=current_user,
             tenant_id=tenant.id,
-            permission_code="application.deploy"
+            permission_code="application.deploy",
         )
 
     except AuthorizationError as error:
-
         raise HTTPException(
             status_code=403,
-            detail=str(error)
-        )
+            detail=str(error),
+        ) from error
+
+    # 2. Resolve requested application version.
+    version = db.get(
+        ApplicationVersion,
+        version_id,
+    )
 
     if not version:
-
         raise HTTPException(
             status_code=404,
-            detail="Application version not found"
+            detail="Application version not found",
         )
 
     if version.status != "image_ready":
-
         raise HTTPException(
             status_code=409,
             detail=(
                 "Application version does not "
                 "have a ready image."
-            )
+            ),
         )
 
     application = db.get(
         Application,
-        version.application_id
+        version.application_id,
     )
 
     if not application:
-
         raise HTTPException(
             status_code=404,
-            detail="Application not found"
+            detail="Application not found",
         )
 
+    # 3. Subscription / entitlement gate.
+    # This must run after the application is known and before
+    # any instance, deployment record, or container is created.
+    try:
+        require_active_entitlement(
+            db=db,
+            tenant_id=tenant.id,
+            application_id=application.id,
+            entitlement_code="application.deploy",
+        )
+
+    except EntitlementError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # 4. Find latest ready build.
     build = db.scalar(
         select(ApplicationBuild)
         .where(
             ApplicationBuild.application_version_id
             == version.id,
-
             ApplicationBuild.status
-            == "ready"
+            == "ready",
         )
         .order_by(
-            ApplicationBuild.created_at.desc()
+            ApplicationBuild.created_at.desc(),
         )
     )
 
     if not build:
-
         raise HTTPException(
             status_code=409,
-            detail="No ready build found"
+            detail="No ready build found",
         )
 
     if not build.image_ref:
-
         raise HTTPException(
             status_code=409,
-            detail="Build has no image reference"
+            detail="Build has no image reference",
         )
 
-    short_id = (
-        uuid.uuid4().hex[:8]
-    )
+    # 5. Create instance and deployment records.
+    short_id = uuid.uuid4().hex[:8]
 
     instance_key = (
         f"{tenant.slug}-"
@@ -215,11 +223,10 @@ def deploy_application(
         active_version_id=version.id,
         instance_key=instance_key,
         name=instance_name,
-        status="provisioning"
+        status="provisioning",
     )
 
     db.add(instance)
-
     db.flush()
 
     container_name = safe_name(
@@ -235,93 +242,56 @@ def deploy_application(
         build_id=build.id,
         status="deploying",
         container_name=container_name,
-        health_status="starting"
+        health_status="starting",
     )
 
     db.add(deployment)
-
     db.commit()
 
     db.refresh(instance)
     db.refresh(deployment)
 
+    # 6. Start runtime container.
     try:
-
         result = start_container(
             image_ref=build.image_ref,
             manifest=version.manifest,
             container_name=container_name,
             labels={
-                "augmis.managed":
-                    "true",
-
-                "augmis.instance_id":
-                    str(instance.id),
-
-                "augmis.tenant_id":
-                    str(tenant.id),
-
-                "augmis.application_id":
-                    str(application.id)
-            }
+                "augmis.managed": "true",
+                "augmis.instance_id": str(instance.id),
+                "augmis.tenant_id": str(tenant.id),
+                "augmis.application_id": str(application.id),
+            },
         )
 
     except DeploymentError as error:
-
         instance.status = "failed"
 
         deployment.status = "failed"
-
-        deployment.health_status = (
-            "unhealthy"
-        )
-
-        deployment.error_message = (
-            str(error)
-        )
+        deployment.health_status = "unhealthy"
+        deployment.error_message = str(error)
 
         db.commit()
 
         raise HTTPException(
             status_code=422,
             detail={
-                "message":
-                    "Application deployment failed",
+                "message": "Application deployment failed",
+                "deploymentId": str(deployment.id),
+                "error": str(error),
+            },
+        ) from error
 
-                "deploymentId":
-                    str(deployment.id),
-
-                "error":
-                    str(error)
-            }
-        )
-
-    deployment.container_id = (
-        result["container_id"]
-    )
-
-    deployment.container_name = (
-        result["container_name"]
-    )
-
-    deployment.host_port = (
-        result["host_port"]
-    )
-
-    deployment.runtime_url = (
-        result["runtime_url"]
-    )
+    deployment.container_id = result["container_id"]
+    deployment.container_name = result["container_name"]
+    deployment.host_port = result["host_port"]
+    deployment.runtime_url = result["runtime_url"]
 
     deployment.status = "running"
-
-    deployment.health_status = (
-        "healthy"
-    )
-
-    deployment.deployed_at = (
-        datetime.now(
-            timezone.utc
-        )
+    deployment.health_status = "healthy"
+    deployment.deployed_at = datetime.now(
+        timezone.utc,
     )
 
     instance.status = "running"
@@ -329,235 +299,170 @@ def deploy_application(
     db.commit()
 
     return {
-
-        "status":
-            "RUNNING",
-
+        "status": "RUNNING",
         "tenant": {
-            "id":
-                str(tenant.id),
-
-            "name":
-                tenant.name
+            "id": str(tenant.id),
+            "name": tenant.name,
         },
-
         "application": {
-            "id":
-                str(application.id),
-
-            "name":
-                application.name
+            "id": str(application.id),
+            "name": application.name,
         },
-
         "instance": {
-            "id":
-                str(instance.id),
-
-            "instanceKey":
-                instance.instance_key,
-
-            "name":
-                instance.name,
-
-            "status":
-                instance.status
+            "id": str(instance.id),
+            "instanceKey": instance.instance_key,
+            "name": instance.name,
+            "status": instance.status,
         },
-
         "deployment": {
-            "id":
-                str(deployment.id),
-
-            "containerId":
-                deployment.container_id,
-
-            "containerName":
-                deployment.container_name,
-
-            "hostPort":
-                deployment.host_port,
-
-            "url":
-                deployment.runtime_url,
-
-            "health":
-                deployment.health_status
-        }
+            "id": str(deployment.id),
+            "containerId": deployment.container_id,
+            "containerName": deployment.container_name,
+            "hostPort": deployment.host_port,
+            "url": deployment.runtime_url,
+            "health": deployment.health_status,
+        },
     }
 
 
 @router.get(
-    "/tenants/{tenant_id}/instances"
+    "/tenants/{tenant_id}/instances",
 )
-
 def list_tenant_instances(
     tenant_id: uuid.UUID,
-
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    )
+    current_user: User = Depends(get_current_user),
 ):
-
     tenant = db.get(
         Tenant,
-        tenant_id
+        tenant_id,
     )
 
     if not tenant:
-
         raise HTTPException(
             status_code=404,
-            detail="Tenant not found"
+            detail="Tenant not found",
         )
 
     try:
-
         require_tenant_permission(
             db=db,
             user=current_user,
             tenant_id=tenant.id,
-            permission_code="application.instance.view"
+            permission_code="application.instance.view",
         )
 
     except AuthorizationError as error:
-
         raise HTTPException(
             status_code=403,
-            detail=str(error)
-        )
+            detail=str(error),
+        ) from error
 
     instances = list(
         db.scalars(
             select(ApplicationInstance)
             .where(
                 ApplicationInstance.tenant_id
-                == tenant_id
+                == tenant_id,
             )
             .order_by(
-                ApplicationInstance.created_at.desc()
+                ApplicationInstance.created_at.desc(),
             )
         )
     )
 
     return [
         {
-            "id":
-                str(instance.id),
-
-            "applicationId":
-                str(instance.application_id),
-
-            "versionId":
-                str(instance.active_version_id),
-
-            "instanceKey":
-                instance.instance_key,
-
-            "name":
-                instance.name,
-
-            "status":
-                instance.status
+            "id": str(instance.id),
+            "applicationId": str(
+                instance.application_id,
+            ),
+            "versionId": str(
+                instance.active_version_id,
+            ),
+            "instanceKey": instance.instance_key,
+            "name": instance.name,
+            "status": instance.status,
         }
-
         for instance in instances
     ]
 
+
 @router.post(
-    "/instances/{instance_id}/stop"
+    "/instances/{instance_id}/stop",
 )
-
-
 def stop_application_instance(
     instance_id: uuid.UUID,
-
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    )
+    current_user: User = Depends(get_current_user),
 ):
-
     instance = db.get(
         ApplicationInstance,
-        instance_id
+        instance_id,
     )
 
     if not instance:
-
         raise HTTPException(
             status_code=404,
-            detail="Instance not found"
+            detail="Instance not found",
         )
 
+    # Stopping must still be possible if a subscription expires.
+    # Therefore stop checks RBAC only, not active entitlement.
     try:
-
         require_tenant_permission(
             db=db,
             user=current_user,
             tenant_id=instance.tenant_id,
-            permission_code="application.instance.stop"
+            permission_code="application.instance.stop",
         )
 
     except AuthorizationError as error:
-
         raise HTTPException(
             status_code=403,
-            detail=str(error)
-        )
+            detail=str(error),
+        ) from error
 
     deployment = db.scalar(
         select(ApplicationDeployment)
         .where(
             ApplicationDeployment.instance_id
             == instance.id,
-
             ApplicationDeployment.status
-            == "running"
+            == "running",
         )
         .order_by(
-            ApplicationDeployment.created_at.desc()
+            ApplicationDeployment.created_at.desc(),
         )
     )
 
     if not deployment:
-
         raise HTTPException(
             status_code=409,
-            detail="No running deployment found"
+            detail="No running deployment found",
         )
 
     if not deployment.container_name:
-
         raise HTTPException(
             status_code=409,
-            detail="Deployment has no container"
+            detail="Deployment has no container",
         )
 
     try:
-
         stop_container(
-            deployment.container_name
+            deployment.container_name,
         )
 
     except DeploymentError as error:
-
         raise HTTPException(
             status_code=422,
-            detail=str(error)
-        )
+            detail=str(error),
+        ) from error
 
     deployment.status = "stopped"
-
-    deployment.health_status = (
-        "stopped"
-    )
-
-    deployment.stopped_at = (
-        datetime.now(
-            timezone.utc
-        )
+    deployment.health_status = "stopped"
+    deployment.stopped_at = datetime.now(
+        timezone.utc,
     )
 
     instance.status = "stopped"
@@ -565,9 +470,6 @@ def stop_application_instance(
     db.commit()
 
     return {
-        "status":
-            "STOPPED",
-
-        "instanceId":
-            str(instance.id)
+        "status": "STOPPED",
+        "instanceId": str(instance.id),
     }
