@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    SettingsConfigDict
+)
 
 
 class Settings(BaseSettings):
@@ -14,6 +17,12 @@ class Settings(BaseSettings):
     package_storage_path: str = "data/packages"
 
     max_upload_size_mb: int = 250
+
+    jwt_secret: str
+
+    jwt_algorithm: str = "HS256"
+
+    access_token_minutes: int = 60
 
     model_config = SettingsConfigDict(
         env_file=".env",

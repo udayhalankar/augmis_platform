@@ -10,6 +10,17 @@ from services.api.app.routes import (
     tenants,
 )
 
+from services.api.app.routes import (
+    applications,
+    auth,
+    health,
+    instances,
+    publishers,
+    tenants,
+)
+
+
+
 
 app = FastAPI(
     title=settings.app_name,
@@ -17,6 +28,9 @@ app = FastAPI(
     description="AUGMIS SaaS Platform Control Plane API",
 )
 
+app.include_router(
+    auth.router
+)
 
 app.include_router(
     health.router

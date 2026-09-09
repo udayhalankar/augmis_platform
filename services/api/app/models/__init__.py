@@ -10,6 +10,17 @@ from services.api.app.models.platform import (
     Tenant,
 )
 
+from services.api.app.models.iam import (
+    Permission,
+    PublisherMembership,
+    PublisherMembershipRole,
+    Role,
+    RolePermission,
+    TenantMembership,
+    TenantMembershipRole,
+    User,
+)
+
 __all__ = [
     "Publisher",
     "Tenant",
@@ -20,4 +31,13 @@ __all__ = [
     "ApplicationBuild",
     "ApplicationInstance",
     "ApplicationDeployment",
+
+    "User",
+    "Role",
+    "Permission",
+    "RolePermission",
+    "TenantMembership",
+    "TenantMembershipRole",
+    "PublisherMembership",
+    "PublisherMembershipRole",
 ]
