@@ -681,3 +681,94 @@ def get_build(
         "finishedAt":
             build.finished_at
     }
+
+
+    __tablename__ = "application_deployments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_instances.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    application_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    build_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_builds.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="deploying",
+        index=True
+    )
+
+    container_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True
+    )
+
+    container_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True
+    )
+
+    host_port: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True
+    )
+
+    runtime_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True
+    )
+
+    health_status: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    deployed_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    stopped_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now()
+    )

@@ -335,3 +335,290 @@ class ApplicationBuild(Base):
         nullable=False,
         server_default=func.now()
     )
+
+
+class Tenant(Base):
+
+    __tablename__ = "tenants"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False
+    )
+
+    slug: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        unique=True,
+        index=True
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="active"
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now()
+    )
+
+
+class ApplicationInstance(Base):
+
+    __tablename__ = "application_instances"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "tenants.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "applications.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    active_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=False
+    )
+
+    instance_key: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+        unique=True,
+        index=True
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(200),
+        nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="provisioning",
+        index=True
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now()
+    )
+
+
+class ApplicationDeployment(Base):
+
+    __tablename__ = "application_deployments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_instances.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    application_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    build_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_builds.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="deploying",
+        index=True
+    )
+
+    container_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True
+    )
+
+    container_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True
+    )
+
+    host_port: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True
+    )
+
+    runtime_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True
+    )
+
+    health_status: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    deployed_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    stopped_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now()
+    )
+
+    
+
+
+
+    __tablename__ = "application_deployments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    instance_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_instances.id",
+            ondelete="CASCADE"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    application_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    build_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_builds.id",
+            ondelete="RESTRICT"
+        ),
+        nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="deploying",
+        index=True
+    )
+
+    container_id: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True
+    )
+
+    container_name: Mapped[str | None] = mapped_column(
+        String(200),
+        nullable=True
+    )
+
+    host_port: Mapped[int | None] = mapped_column(
+        BigInteger,
+        nullable=True
+    )
+
+    runtime_url: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True
+    )
+
+    health_status: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    deployed_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    stopped_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now()
+    )
