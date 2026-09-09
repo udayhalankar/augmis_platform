@@ -14,6 +14,19 @@ from fastapi import (
     UploadFile
 )
 
+from services.api.app.core.auth import (
+    get_current_user
+)
+
+from services.api.app.models.iam import (
+    User
+)
+
+from services.api.app.services.authorization_service import (
+    AuthorizationError,
+    require_publisher_permission
+)
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -102,14 +115,21 @@ def save_upload(
 )
 def upload_application(
     publisher_id: uuid.UUID,
+
     file: UploadFile = File(...),
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
     publisher = db.get(
         Publisher,
         publisher_id
     )
+    
 
     if not publisher:
 
@@ -117,6 +137,7 @@ def upload_application(
             status_code=404,
             detail="Publisher not found"
         )
+    
 
     if not file.filename:
 
@@ -134,6 +155,24 @@ def upload_application(
             detail="Only ZIP application packages are allowed"
         )
 
+
+    try:
+
+        require_publisher_permission(
+            db=db,
+            user=current_user,
+            publisher_id=publisher.id,
+            permission_code="application.upload"
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error)
+        )
+
+    
     package_id = uuid.uuid4()
 
     quarantine_root = (
@@ -447,15 +486,38 @@ def list_applications(
     "/application-packages/{package_id}/build",
     status_code=201
 )
+
+
 def build_application_package(
     package_id: uuid.UUID,
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
     package = db.get(
         ApplicationPackage,
         package_id
     )
+
+    try:
+
+        require_publisher_permission(
+            db=db,
+            user=current_user,
+            publisher_id=package.publisher_id,
+            permission_code="application.manage"
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error)
+        )
 
     if not package:
 
@@ -682,93 +744,3 @@ def get_build(
             build.finished_at
     }
 
-
-    __tablename__ = "application_deployments"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        primary_key=True,
-        default=uuid.uuid4
-    )
-
-    instance_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey(
-            "application_instances.id",
-            ondelete="CASCADE"
-        ),
-        nullable=False,
-        index=True
-    )
-
-    application_version_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey(
-            "application_versions.id",
-            ondelete="RESTRICT"
-        ),
-        nullable=False,
-        index=True
-    )
-
-    build_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey(
-            "application_builds.id",
-            ondelete="RESTRICT"
-        ),
-        nullable=False
-    )
-
-    status: Mapped[str] = mapped_column(
-        String(30),
-        nullable=False,
-        default="deploying",
-        index=True
-    )
-
-    container_id: Mapped[str | None] = mapped_column(
-        String(200),
-        nullable=True
-    )
-
-    container_name: Mapped[str | None] = mapped_column(
-        String(200),
-        nullable=True
-    )
-
-    host_port: Mapped[int | None] = mapped_column(
-        BigInteger,
-        nullable=True
-    )
-
-    runtime_url: Mapped[str | None] = mapped_column(
-        String(500),
-        nullable=True
-    )
-
-    health_status: Mapped[str | None] = mapped_column(
-        String(30),
-        nullable=True
-    )
-
-    error_message: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True
-    )
-
-    deployed_at: Mapped[object | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-
-    stopped_at: Mapped[object | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True
-    )
-
-    created_at: Mapped[object] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.now()
-    )

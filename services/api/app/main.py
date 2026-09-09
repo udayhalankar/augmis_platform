@@ -15,6 +15,7 @@ from services.api.app.routes import (
     auth,
     health,
     instances,
+    memberships,
     publishers,
     tenants,
 )
@@ -34,6 +35,10 @@ app.include_router(
 
 app.include_router(
     health.router
+)
+
+app.include_router(
+    memberships.router
 )
 
 app.include_router(

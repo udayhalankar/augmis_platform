@@ -1,12 +1,37 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException
+)
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from services.api.app.db.session import get_db
-from services.api.app.models.platform import Publisher
+from services.api.app.core.auth import (
+    get_current_user
+)
+
+from services.api.app.db.session import (
+    get_db
+)
+
+from services.api.app.models.iam import (
+    PublisherMembership,
+    User
+)
+
+from services.api.app.models.platform import (
+    Publisher
+)
+
 from services.api.app.schemas.publisher import (
     PublisherCreate,
-    PublisherResponse,
+    PublisherResponse
+)
+
+from services.api.app.services.membership_service import (
+    MembershipSetupError,
+    create_publisher_owner_membership
 )
 
 
@@ -23,13 +48,19 @@ router = APIRouter(
 )
 def create_publisher(
     payload: PublisherCreate,
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
     existing = db.scalar(
         select(Publisher)
         .where(
-            Publisher.slug == payload.slug
+            Publisher.slug
+            == payload.slug
         )
     )
 
@@ -40,18 +71,38 @@ def create_publisher(
             detail="Publisher slug already exists"
         )
 
-    publisher = Publisher(
-        name=payload.name,
-        slug=payload.slug
-    )
+    try:
 
-    db.add(publisher)
+        publisher = Publisher(
+            name=payload.name,
+            slug=payload.slug,
+            status="active"
+        )
 
-    db.commit()
+        db.add(publisher)
 
-    db.refresh(publisher)
+        db.flush()
 
-    return publisher
+        create_publisher_owner_membership(
+            db=db,
+            publisher_id=publisher.id,
+            user_id=current_user.id
+        )
+
+        db.commit()
+
+        db.refresh(publisher)
+
+        return publisher
+
+    except MembershipSetupError as error:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
 
 
 @router.get(
@@ -59,12 +110,30 @@ def create_publisher(
     response_model=list[PublisherResponse]
 )
 def list_publishers(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
-    return list(
-        db.scalars(
-            select(Publisher)
-            .order_by(Publisher.name)
+    publishers = db.scalars(
+        select(Publisher)
+        .join(
+            PublisherMembership,
+            PublisherMembership.publisher_id
+            == Publisher.id
+        )
+        .where(
+            PublisherMembership.user_id
+            == current_user.id,
+
+            PublisherMembership.status
+            == "active"
+        )
+        .order_by(
+            Publisher.name
         )
     )
+
+    return list(publishers)

@@ -7,7 +7,15 @@ from fastapi import (
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from services.api.app.core.auth import (
+    get_current_user
+)
+
 from services.api.app.db.session import get_db
+
+from services.api.app.models.iam import (
+    User
+)
 
 from services.api.app.models.platform import (
     Tenant
@@ -16,6 +24,11 @@ from services.api.app.models.platform import (
 from services.api.app.schemas.tenant import (
     TenantCreate,
     TenantResponse
+)
+
+from services.api.app.services.membership_service import (
+    MembershipSetupError,
+    create_tenant_owner_membership
 )
 
 
@@ -32,13 +45,19 @@ router = APIRouter(
 )
 def create_tenant(
     payload: TenantCreate,
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
     existing = db.scalar(
         select(Tenant)
         .where(
-            Tenant.slug == payload.slug
+            Tenant.slug
+            == payload.slug
         )
     )
 
@@ -49,19 +68,38 @@ def create_tenant(
             detail="Tenant slug already exists"
         )
 
-    tenant = Tenant(
-        name=payload.name,
-        slug=payload.slug,
-        status="active"
-    )
+    try:
 
-    db.add(tenant)
+        tenant = Tenant(
+            name=payload.name,
+            slug=payload.slug,
+            status="active"
+        )
 
-    db.commit()
+        db.add(tenant)
 
-    db.refresh(tenant)
+        db.flush()
 
-    return tenant
+        create_tenant_owner_membership(
+            db=db,
+            tenant_id=tenant.id,
+            user_id=current_user.id
+        )
+
+        db.commit()
+
+        db.refresh(tenant)
+
+        return tenant
+
+    except MembershipSetupError as error:
+
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(error)
+        )
 
 
 @router.get(
@@ -69,14 +107,33 @@ def create_tenant(
     response_model=list[TenantResponse]
 )
 def list_tenants(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
-    return list(
-        db.scalars(
-            select(Tenant)
-            .order_by(
-                Tenant.name
-            )
+    from services.api.app.models.iam import (
+        TenantMembership
+    )
+
+    tenants = db.scalars(
+        select(Tenant)
+        .join(
+            TenantMembership,
+            TenantMembership.tenant_id
+            == Tenant.id
+        )
+        .where(
+            TenantMembership.user_id
+            == current_user.id,
+
+            TenantMembership.status
+            == "active"
+        )
+        .order_by(
+            Tenant.name
         )
     )
+
+    return list(tenants)

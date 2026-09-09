@@ -14,6 +14,19 @@ from fastapi import (
     HTTPException
 )
 
+from services.api.app.core.auth import (
+    get_current_user
+)
+
+from services.api.app.models.iam import (
+    User
+)
+
+from services.api.app.services.authorization_service import (
+    AuthorizationError,
+    require_tenant_permission
+)
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -76,7 +89,12 @@ def deploy_application(
     tenant_id: uuid.UUID,
     version_id: uuid.UUID,
     payload: InstanceDeployRequest,
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
     tenant = db.get(
@@ -102,6 +120,22 @@ def deploy_application(
         ApplicationVersion,
         version_id
     )
+
+    try:
+
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=tenant.id,
+            permission_code="application.deploy"
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error)
+        )
 
     if not version:
 
@@ -354,9 +388,15 @@ def deploy_application(
 @router.get(
     "/tenants/{tenant_id}/instances"
 )
+
 def list_tenant_instances(
     tenant_id: uuid.UUID,
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
     tenant = db.get(
@@ -369,6 +409,22 @@ def list_tenant_instances(
         raise HTTPException(
             status_code=404,
             detail="Tenant not found"
+        )
+
+    try:
+
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=tenant.id,
+            permission_code="application.instance.view"
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error)
         )
 
     instances = list(
@@ -408,13 +464,19 @@ def list_tenant_instances(
         for instance in instances
     ]
 
-
 @router.post(
     "/instances/{instance_id}/stop"
 )
+
+
 def stop_application_instance(
     instance_id: uuid.UUID,
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    )
 ):
 
     instance = db.get(
@@ -427,6 +489,22 @@ def stop_application_instance(
         raise HTTPException(
             status_code=404,
             detail="Instance not found"
+        )
+
+    try:
+
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=instance.tenant_id,
+            permission_code="application.instance.stop"
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error)
         )
 
     deployment = db.scalar(
