@@ -3,3 +3,27 @@
 .env
 .env.*
 !.env.example
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+
+# Python generated files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# AUGMIS runtime package storage
+data/packages/
+
+# Logs
+*.log
