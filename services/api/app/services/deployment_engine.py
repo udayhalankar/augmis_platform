@@ -101,7 +101,7 @@ def wait_for_health(
                 if (
                     200
                     <= response.status
-                    < 500
+                    < 300
                 ):
 
                     return
