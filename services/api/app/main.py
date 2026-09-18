@@ -4,25 +4,15 @@ from services.api.app.core.config import settings
 
 from services.api.app.routes import (
     applications,
-    health,
-    instances,
-    publishers,
-    tenants,
-)
-
-from services.api.app.routes import (
-    applications,
     auth,
     health,
     instances,
-    offers,
-    subscriptions,
     memberships,
+    offers,
     publishers,
+    subscriptions,
     tenants,
 )
-
-
 
 
 app = FastAPI(
@@ -31,24 +21,13 @@ app = FastAPI(
     description="AUGMIS SaaS Platform Control Plane API",
 )
 
+
 app.include_router(
     auth.router
 )
 
 app.include_router(
     health.router
-)
-
-app.include_router(
-    offers.router
-)
-
-app.include_router(
-    subscriptions.router
-)
-
-app.include_router(
-    memberships.router
 )
 
 app.include_router(
@@ -60,7 +39,19 @@ app.include_router(
 )
 
 app.include_router(
+    memberships.router
+)
+
+app.include_router(
     applications.router
+)
+
+app.include_router(
+    offers.router
+)
+
+app.include_router(
+    subscriptions.router
 )
 
 app.include_router(

@@ -2,12 +2,14 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     JSON,
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 
@@ -20,6 +22,10 @@ from sqlalchemy.orm import (
 
 from services.api.app.db.base import Base
 
+
+# =========================================================
+# APPLICATION OFFER
+# =========================================================
 
 class ApplicationOffer(Base):
 
@@ -77,6 +83,33 @@ class ApplicationOffer(Base):
         index=True,
     )
 
+    # -----------------------------------------------------
+    # Stage 5C version policy
+    # -----------------------------------------------------
+
+    version_policy: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="same_major",
+        server_default="same_major",
+    )
+
+    pinned_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+
+    auto_upgrade: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+
     activated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -95,6 +128,10 @@ class ApplicationOffer(Base):
         onupdate=func.now(),
     )
 
+
+# =========================================================
+# OFFER ENTITLEMENT TEMPLATE
+# =========================================================
 
 class OfferEntitlement(Base):
 
@@ -148,6 +185,10 @@ class OfferEntitlement(Base):
     )
 
 
+# =========================================================
+# TENANT SUBSCRIPTION
+# =========================================================
+
 class TenantSubscription(Base):
 
     __tablename__ = "tenant_subscriptions"
@@ -195,6 +236,61 @@ class TenantSubscription(Base):
         index=True,
     )
 
+    # -----------------------------------------------------
+    # Stage 5C subscription version snapshot
+    # -----------------------------------------------------
+
+    baseline_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+
+    version_policy: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="same_major",
+        server_default="same_major",
+    )
+
+    pinned_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey(
+            "application_versions.id",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
+
+    auto_upgrade: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
+
+    # -----------------------------------------------------
+    # Stage 5C lifecycle fields
+    # -----------------------------------------------------
+
+    suspended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    resumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    suspension_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     starts_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -224,6 +320,10 @@ class TenantSubscription(Base):
         onupdate=func.now(),
     )
 
+
+# =========================================================
+# SUBSCRIPTION ENTITLEMENT
+# =========================================================
 
 class SubscriptionEntitlement(Base):
 

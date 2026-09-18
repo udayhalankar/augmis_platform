@@ -1,4 +1,5 @@
 import uuid
+
 from datetime import (
     datetime,
     timezone,
@@ -37,9 +38,24 @@ from services.api.app.models.platform import (
     Tenant,
 )
 
+from services.api.app.schemas.subscription import (
+    SubscriptionSuspendRequest,
+)
+
 from services.api.app.services.authorization_service import (
     AuthorizationError,
     require_tenant_permission,
+)
+
+from services.api.app.services.subscription_lifecycle_service import (
+    SubscriptionLifecycleError,
+    resume_subscription,
+    suspend_subscription,
+)
+
+from services.api.app.services.version_policy_service import (
+    VersionPolicyError,
+    resolve_subscription_baseline,
 )
 
 
@@ -49,6 +65,10 @@ router = APIRouter(
 )
 
 
+# =========================================================
+# SUBSCRIBE TO OFFER
+# =========================================================
+
 @router.post(
     "/tenants/{tenant_id}/offers/{offer_id}/subscribe",
     status_code=201,
@@ -56,12 +76,8 @@ router = APIRouter(
 def subscribe_to_offer(
     tenant_id: uuid.UUID,
     offer_id: uuid.UUID,
-
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
 
     tenant = db.get(
@@ -70,14 +86,16 @@ def subscribe_to_offer(
     )
 
     if not tenant:
-
         raise HTTPException(
             status_code=404,
             detail="Tenant not found",
         )
 
-    try:
+    # -----------------------------------------------------
+    # RBAC
+    # -----------------------------------------------------
 
+    try:
         require_tenant_permission(
             db=db,
             user=current_user,
@@ -86,11 +104,14 @@ def subscribe_to_offer(
         )
 
     except AuthorizationError as error:
-
         raise HTTPException(
             status_code=403,
             detail=str(error),
-        )
+        ) from error
+
+    # -----------------------------------------------------
+    # Offer
+    # -----------------------------------------------------
 
     offer = db.get(
         ApplicationOffer,
@@ -98,14 +119,12 @@ def subscribe_to_offer(
     )
 
     if not offer:
-
         raise HTTPException(
             status_code=404,
             detail="Offer not found",
         )
 
     if offer.status != "active":
-
         raise HTTPException(
             status_code=409,
             detail="Offer is not active",
@@ -117,11 +136,17 @@ def subscribe_to_offer(
     )
 
     if not application:
-
         raise HTTPException(
             status_code=404,
             detail="Application not found",
         )
+
+    # -----------------------------------------------------
+    # Prevent duplicate live subscriptions.
+    #
+    # Suspended is still an existing subscription and must
+    # be resumed rather than creating another subscription.
+    # -----------------------------------------------------
 
     existing = db.scalar(
         select(TenantSubscription)
@@ -134,8 +159,12 @@ def subscribe_to_offer(
             TenantSubscription.tenant_id
             == tenant.id,
 
-            TenantSubscription.status
-            == "active",
+            TenantSubscription.status.in_(
+                (
+                    "active",
+                    "suspended",
+                )
+            ),
 
             ApplicationOffer.application_id
             == application.id,
@@ -147,10 +176,14 @@ def subscribe_to_offer(
         raise HTTPException(
             status_code=409,
             detail=(
-                "Tenant already has an active "
+                "Tenant already has an active or suspended "
                 "subscription for this application"
             ),
         )
+
+    # -----------------------------------------------------
+    # Load entitlement templates from offer.
+    # -----------------------------------------------------
 
     offer_entitlements = list(
         db.scalars(
@@ -166,27 +199,71 @@ def subscribe_to_offer(
     )
 
     if not offer_entitlements:
-
         raise HTTPException(
             status_code=422,
             detail="Offer has no active entitlements",
         )
 
+    # -----------------------------------------------------
+    # Resolve commercial version baseline.
+    #
+    # For same_major:
+    # 1.0.0 baseline allows 1.x
+    #
+    # For pinned:
+    # baseline resolves to pinned version.
+    # -----------------------------------------------------
+
+    try:
+
+        baseline_version = (
+            resolve_subscription_baseline(
+                db=db,
+                offer=offer,
+            )
+        )
+
+    except VersionPolicyError as error:
+        raise HTTPException(
+            status_code=422,
+            detail=str(error),
+        ) from error
+
     now = datetime.now(
         timezone.utc
     )
+
+    # -----------------------------------------------------
+    # Create commercial subscription snapshot.
+    #
+    # IMPORTANT:
+    # Copy version policy from the offer into the
+    # subscription. Future offer changes must not silently
+    # change an existing customer's contract.
+    # -----------------------------------------------------
 
     subscription = TenantSubscription(
         tenant_id=tenant.id,
         offer_id=offer.id,
         created_by_user_id=current_user.id,
+
         status="active",
+
+        baseline_version_id=baseline_version.id,
+        version_policy=offer.version_policy,
+        pinned_version_id=offer.pinned_version_id,
+        auto_upgrade=offer.auto_upgrade,
+
         starts_at=now,
     )
 
     db.add(subscription)
 
     db.flush()
+
+    # -----------------------------------------------------
+    # Snapshot offer entitlements onto subscription.
+    # -----------------------------------------------------
 
     for template in offer_entitlements:
 
@@ -206,15 +283,35 @@ def subscribe_to_offer(
 
     return {
         "status": "ACTIVE",
+
         "subscriptionId": str(
             subscription.id
         ),
+
         "tenantId": str(
             subscription.tenant_id
         ),
+
         "offerId": str(
             subscription.offer_id
         ),
+
+        "baselineVersionId": str(
+            subscription.baseline_version_id
+        ),
+
+        "versionPolicy":
+            subscription.version_policy,
+
+        "pinnedVersionId": (
+            str(subscription.pinned_version_id)
+            if subscription.pinned_version_id
+            else None
+        ),
+
+        "autoUpgrade":
+            subscription.auto_upgrade,
+
         "application": {
             "id": str(application.id),
             "name": application.name,
@@ -222,17 +319,17 @@ def subscribe_to_offer(
     }
 
 
+# =========================================================
+# LIST TENANT SUBSCRIPTIONS
+# =========================================================
+
 @router.get(
     "/tenants/{tenant_id}/subscriptions"
 )
 def list_subscriptions(
     tenant_id: uuid.UUID,
-
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
 
     tenant = db.get(
@@ -241,14 +338,12 @@ def list_subscriptions(
     )
 
     if not tenant:
-
         raise HTTPException(
             status_code=404,
             detail="Tenant not found",
         )
 
     try:
-
         require_tenant_permission(
             db=db,
             user=current_user,
@@ -257,11 +352,10 @@ def list_subscriptions(
         )
 
     except AuthorizationError as error:
-
         raise HTTPException(
             status_code=403,
             detail=str(error),
-        )
+        ) from error
 
     rows = db.execute(
         select(
@@ -291,14 +385,52 @@ def list_subscriptions(
     return [
         {
             "id": str(subscription.id),
-            "status": subscription.status,
-            "startsAt": subscription.starts_at,
-            "endsAt": subscription.ends_at,
+
+            "status":
+                subscription.status,
+
+            "startsAt":
+                subscription.starts_at,
+
+            "endsAt":
+                subscription.ends_at,
+
+            "cancelledAt":
+                subscription.cancelled_at,
+
+            "suspendedAt":
+                subscription.suspended_at,
+
+            "resumedAt":
+                subscription.resumed_at,
+
+            "suspensionReason":
+                subscription.suspension_reason,
+
+            "baselineVersionId": (
+                str(subscription.baseline_version_id)
+                if subscription.baseline_version_id
+                else None
+            ),
+
+            "versionPolicy":
+                subscription.version_policy,
+
+            "pinnedVersionId": (
+                str(subscription.pinned_version_id)
+                if subscription.pinned_version_id
+                else None
+            ),
+
+            "autoUpgrade":
+                subscription.auto_upgrade,
+
             "offer": {
                 "id": str(offer.id),
                 "name": offer.name,
                 "offerKey": offer.offer_key,
             },
+
             "application": {
                 "id": str(application.id),
                 "name": application.name,
@@ -306,39 +438,51 @@ def list_subscriptions(
             },
         }
 
-        for subscription, offer, application
-        in rows
+        for (
+            subscription,
+            offer,
+            application,
+        ) in rows
     ]
 
+
+# =========================================================
+# LIST TENANT ENTITLEMENTS
+# =========================================================
 
 @router.get(
     "/tenants/{tenant_id}/entitlements"
 )
 def list_entitlements(
     tenant_id: uuid.UUID,
-
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
 
-    try:
+    tenant = db.get(
+        Tenant,
+        tenant_id,
+    )
 
+    if not tenant:
+        raise HTTPException(
+            status_code=404,
+            detail="Tenant not found",
+        )
+
+    try:
         require_tenant_permission(
             db=db,
             user=current_user,
-            tenant_id=tenant_id,
+            tenant_id=tenant.id,
             permission_code="subscription.view",
         )
 
     except AuthorizationError as error:
-
         raise HTTPException(
             status_code=403,
             detail=str(error),
-        )
+        ) from error
 
     rows = db.execute(
         select(
@@ -364,7 +508,7 @@ def list_entitlements(
         )
         .where(
             TenantSubscription.tenant_id
-            == tenant_id
+            == tenant.id
         )
         .order_by(
             SubscriptionEntitlement.created_at.desc()
@@ -374,16 +518,34 @@ def list_entitlements(
     return [
         {
             "id": str(entitlement.id),
-            "code": entitlement.code,
-            "status": entitlement.status,
-            "value": entitlement.value_json,
-            "application": {
-                "id": str(application.id),
-                "name": application.name,
-            },
+
+            "code":
+                entitlement.code,
+
+            "status":
+                entitlement.status,
+
+            "value":
+                entitlement.value_json,
+
+            "startsAt":
+                entitlement.starts_at,
+
+            "endsAt":
+                entitlement.ends_at,
+
             "subscriptionId": str(
                 subscription.id
             ),
+
+            "subscriptionStatus":
+                subscription.status,
+
+            "application": {
+                "id": str(application.id),
+                "name": application.name,
+                "appKey": application.app_key,
+            },
         }
 
         for (
@@ -395,17 +557,18 @@ def list_entitlements(
     ]
 
 
+# =========================================================
+# SUSPEND SUBSCRIPTION
+# =========================================================
+
 @router.post(
-    "/subscriptions/{subscription_id}/cancel"
+    "/subscriptions/{subscription_id}/suspend"
 )
-def cancel_subscription(
+def suspend_tenant_subscription(
     subscription_id: uuid.UUID,
-
+    payload: SubscriptionSuspendRequest,
     db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    ),
+    current_user: User = Depends(get_current_user),
 ):
 
     subscription = db.get(
@@ -414,14 +577,16 @@ def cancel_subscription(
     )
 
     if not subscription:
-
         raise HTTPException(
             status_code=404,
             detail="Subscription not found",
         )
 
-    try:
+    # -----------------------------------------------------
+    # RBAC
+    # -----------------------------------------------------
 
+    try:
         require_tenant_permission(
             db=db,
             user=current_user,
@@ -430,11 +595,158 @@ def cancel_subscription(
         )
 
     except AuthorizationError as error:
-
         raise HTTPException(
             status_code=403,
             detail=str(error),
+        ) from error
+
+    # -----------------------------------------------------
+    # Lifecycle transition
+    # active -> suspended
+    # -----------------------------------------------------
+
+    try:
+        suspend_subscription(
+            db=db,
+            subscription=subscription,
+            reason=payload.reason,
         )
+
+    except SubscriptionLifecycleError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=str(error),
+        ) from error
+
+    return {
+        "status": "SUSPENDED",
+        "subscriptionId": str(
+            subscription.id
+        ),
+        "suspendedAt": (
+            subscription.suspended_at
+        ),
+        "reason": (
+            subscription.suspension_reason
+        ),
+    }
+
+
+# =========================================================
+# RESUME SUBSCRIPTION
+# =========================================================
+
+@router.post(
+    "/subscriptions/{subscription_id}/resume"
+)
+def resume_tenant_subscription(
+    subscription_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+
+    subscription = db.get(
+        TenantSubscription,
+        subscription_id,
+    )
+
+    if not subscription:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription not found",
+        )
+
+    # -----------------------------------------------------
+    # RBAC
+    # -----------------------------------------------------
+
+    try:
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=subscription.tenant_id,
+            permission_code="subscription.manage",
+        )
+
+    except AuthorizationError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # -----------------------------------------------------
+    # Lifecycle transition
+    # suspended -> active
+    # -----------------------------------------------------
+
+    try:
+        resume_subscription(
+            db=db,
+            subscription=subscription,
+        )
+
+    except SubscriptionLifecycleError as error:
+        raise HTTPException(
+            status_code=409,
+            detail=str(error),
+        ) from error
+
+    return {
+        "status": "ACTIVE",
+        "subscriptionId": str(
+            subscription.id
+        ),
+        "resumedAt": (
+            subscription.resumed_at
+        ),
+    }
+
+
+# =========================================================
+# CANCEL SUBSCRIPTION
+# =========================================================
+
+@router.post(
+    "/subscriptions/{subscription_id}/cancel"
+)
+def cancel_subscription(
+    subscription_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+
+    subscription = db.get(
+        TenantSubscription,
+        subscription_id,
+    )
+
+    if not subscription:
+        raise HTTPException(
+            status_code=404,
+            detail="Subscription not found",
+        )
+
+    # -----------------------------------------------------
+    # RBAC
+    # -----------------------------------------------------
+
+    try:
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=subscription.tenant_id,
+            permission_code="subscription.manage",
+        )
+
+    except AuthorizationError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # -----------------------------------------------------
+    # Idempotent cancellation
+    # -----------------------------------------------------
 
     if subscription.status == "cancelled":
 
@@ -445,13 +757,20 @@ def cancel_subscription(
             ),
         }
 
-    if subscription.status != "active":
+    # Both active and suspended subscriptions may
+    # legitimately be cancelled.
+
+    if subscription.status not in {
+        "active",
+        "suspended",
+    }:
 
         raise HTTPException(
             status_code=409,
             detail=(
                 f"Cannot cancel subscription "
-                f"from status {subscription.status}"
+                f"from status "
+                f"{subscription.status}"
             ),
         )
 
@@ -463,9 +782,15 @@ def cancel_subscription(
     subscription.cancelled_at = now
     subscription.ends_at = now
 
+    # -----------------------------------------------------
+    # Revoke all subscription entitlements.
+    # -----------------------------------------------------
+
     entitlements = list(
         db.scalars(
-            select(SubscriptionEntitlement)
+            select(
+                SubscriptionEntitlement
+            )
             .where(
                 SubscriptionEntitlement.subscription_id
                 == subscription.id
@@ -482,7 +807,11 @@ def cancel_subscription(
 
     return {
         "status": "CANCELLED",
+
         "subscriptionId": str(
             subscription.id
         ),
+
+        "cancelledAt":
+            subscription.cancelled_at,
     }

@@ -56,6 +56,17 @@ from services.api.app.services.deployment_engine import (
 from services.api.app.services.entitlement_service import (
     EntitlementError,
     require_active_entitlement,
+    require_active_subscription,
+)
+
+from services.api.app.services.instance_limit_service import (
+    InstanceLimitError,
+    require_instance_capacity,
+)
+
+from services.api.app.services.version_policy_service import (
+    VersionPolicyError,
+    require_subscription_version_allowed,
 )
 
 
@@ -68,6 +79,7 @@ router = APIRouter(
 def safe_name(
     value: str,
 ) -> str:
+
     value = value.lower()
 
     value = re.sub(
@@ -96,25 +108,36 @@ def deploy_application(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+
+    # =====================================================
+    # 1. TENANT
+    # =====================================================
+
     tenant = db.get(
         Tenant,
         tenant_id,
     )
 
     if not tenant:
+
         raise HTTPException(
             status_code=404,
             detail="Tenant not found",
         )
 
     if tenant.status != "active":
+
         raise HTTPException(
             status_code=409,
             detail="Tenant is not active",
         )
 
-    # 1. RBAC permission check.
+    # =====================================================
+    # 2. RBAC
+    # =====================================================
+
     try:
+
         require_tenant_permission(
             db=db,
             user=current_user,
@@ -123,24 +146,30 @@ def deploy_application(
         )
 
     except AuthorizationError as error:
+
         raise HTTPException(
             status_code=403,
             detail=str(error),
         ) from error
 
-    # 2. Resolve requested application version.
+    # =====================================================
+    # 3. APPLICATION VERSION
+    # =====================================================
+
     version = db.get(
         ApplicationVersion,
         version_id,
     )
 
     if not version:
+
         raise HTTPException(
             status_code=404,
             detail="Application version not found",
         )
 
     if version.status != "image_ready":
+
         raise HTTPException(
             status_code=409,
             detail=(
@@ -155,34 +184,79 @@ def deploy_application(
     )
 
     if not application:
+
         raise HTTPException(
             status_code=404,
             detail="Application not found",
         )
 
-    # 3. Subscription / entitlement gate.
-    # This must run after the application is known and before
-    # any instance, deployment record, or container is created.
+    # =====================================================
+    # 4. SUBSCRIPTION + ENTITLEMENT + VERSION POLICY
+    # =====================================================
+
     try:
-        require_active_entitlement(
+
+        subscription = require_active_subscription(
+            db=db,
+            tenant_id=tenant.id,
+            application_id=application.id,
+        )
+
+        entitlement = require_active_entitlement(
             db=db,
             tenant_id=tenant.id,
             application_id=application.id,
             entitlement_code="application.deploy",
         )
 
-    except EntitlementError as error:
+        require_subscription_version_allowed(
+            db=db,
+            subscription=subscription,
+            target_version=version,
+        )
+
+    except (
+        EntitlementError,
+        VersionPolicyError,
+    ) as error:
+
         raise HTTPException(
             status_code=403,
             detail=str(error),
         ) from error
 
-    # 4. Find latest ready build.
+    # =====================================================
+    # 5. INSTANCE LIMIT
+    #
+    # MUST happen before ApplicationInstance is created.
+    # =====================================================
+
+    try:
+
+        require_instance_capacity(
+            db=db,
+            tenant_id=tenant.id,
+            application_id=application.id,
+            entitlement=entitlement,
+        )
+
+    except InstanceLimitError as error:
+
+        raise HTTPException(
+            status_code=409,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 6. READY BUILD
+    # =====================================================
+
     build = db.scalar(
         select(ApplicationBuild)
         .where(
             ApplicationBuild.application_version_id
             == version.id,
+
             ApplicationBuild.status
             == "ready",
         )
@@ -192,18 +266,23 @@ def deploy_application(
     )
 
     if not build:
+
         raise HTTPException(
             status_code=409,
             detail="No ready build found",
         )
 
     if not build.image_ref:
+
         raise HTTPException(
             status_code=409,
             detail="Build has no image reference",
         )
 
-    # 5. Create instance and deployment records.
+    # =====================================================
+    # 7. CREATE LOGICAL INSTANCE
+    # =====================================================
+
     short_id = uuid.uuid4().hex[:8]
 
     instance_key = (
@@ -227,7 +306,12 @@ def deploy_application(
     )
 
     db.add(instance)
+
     db.flush()
+
+    # =====================================================
+    # 8. CREATE DEPLOYMENT RECORD
+    # =====================================================
 
     container_name = safe_name(
         f"augmis-"
@@ -246,50 +330,93 @@ def deploy_application(
     )
 
     db.add(deployment)
+
+    # This commit releases the advisory transaction lock,
+    # but the new instance is already persisted as
+    # "provisioning", which is counted as active capacity.
     db.commit()
 
     db.refresh(instance)
     db.refresh(deployment)
 
-    # 6. Start runtime container.
+    # =====================================================
+    # 9. START CONTAINER
+    # =====================================================
+
     try:
+
         result = start_container(
             image_ref=build.image_ref,
             manifest=version.manifest,
             container_name=container_name,
             labels={
                 "augmis.managed": "true",
-                "augmis.instance_id": str(instance.id),
-                "augmis.tenant_id": str(tenant.id),
-                "augmis.application_id": str(application.id),
+
+                "augmis.instance_id":
+                    str(instance.id),
+
+                "augmis.tenant_id":
+                    str(tenant.id),
+
+                "augmis.application_id":
+                    str(application.id),
             },
         )
 
     except DeploymentError as error:
+
         instance.status = "failed"
 
         deployment.status = "failed"
-        deployment.health_status = "unhealthy"
-        deployment.error_message = str(error)
+
+        deployment.health_status = (
+            "unhealthy"
+        )
+
+        deployment.error_message = (
+            str(error)
+        )
 
         db.commit()
 
         raise HTTPException(
             status_code=422,
             detail={
-                "message": "Application deployment failed",
-                "deploymentId": str(deployment.id),
-                "error": str(error),
+                "message":
+                    "Application deployment failed",
+
+                "deploymentId":
+                    str(deployment.id),
+
+                "error":
+                    str(error),
             },
         ) from error
 
-    deployment.container_id = result["container_id"]
-    deployment.container_name = result["container_name"]
-    deployment.host_port = result["host_port"]
-    deployment.runtime_url = result["runtime_url"]
+    # =====================================================
+    # 10. SUCCESS
+    # =====================================================
+
+    deployment.container_id = (
+        result["container_id"]
+    )
+
+    deployment.container_name = (
+        result["container_name"]
+    )
+
+    deployment.host_port = (
+        result["host_port"]
+    )
+
+    deployment.runtime_url = (
+        result["runtime_url"]
+    )
 
     deployment.status = "running"
+
     deployment.health_status = "healthy"
+
     deployment.deployed_at = datetime.now(
         timezone.utc,
     )
@@ -300,27 +427,48 @@ def deploy_application(
 
     return {
         "status": "RUNNING",
+
         "tenant": {
             "id": str(tenant.id),
             "name": tenant.name,
         },
+
         "application": {
             "id": str(application.id),
             "name": application.name,
         },
+
         "instance": {
             "id": str(instance.id),
-            "instanceKey": instance.instance_key,
-            "name": instance.name,
-            "status": instance.status,
+
+            "instanceKey":
+                instance.instance_key,
+
+            "name":
+                instance.name,
+
+            "status":
+                instance.status,
         },
+
         "deployment": {
-            "id": str(deployment.id),
-            "containerId": deployment.container_id,
-            "containerName": deployment.container_name,
-            "hostPort": deployment.host_port,
-            "url": deployment.runtime_url,
-            "health": deployment.health_status,
+            "id":
+                str(deployment.id),
+
+            "containerId":
+                deployment.container_id,
+
+            "containerName":
+                deployment.container_name,
+
+            "hostPort":
+                deployment.host_port,
+
+            "url":
+                deployment.runtime_url,
+
+            "health":
+                deployment.health_status,
         },
     }
 
@@ -333,18 +481,21 @@ def list_tenant_instances(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+
     tenant = db.get(
         Tenant,
         tenant_id,
     )
 
     if not tenant:
+
         raise HTTPException(
             status_code=404,
             detail="Tenant not found",
         )
 
     try:
+
         require_tenant_permission(
             db=db,
             user=current_user,
@@ -353,6 +504,7 @@ def list_tenant_instances(
         )
 
     except AuthorizationError as error:
+
         raise HTTPException(
             status_code=403,
             detail=str(error),
@@ -366,24 +518,34 @@ def list_tenant_instances(
                 == tenant_id,
             )
             .order_by(
-                ApplicationInstance.created_at.desc(),
+                ApplicationInstance
+                .created_at
+                .desc(),
             )
         )
     )
 
     return [
         {
-            "id": str(instance.id),
-            "applicationId": str(
-                instance.application_id,
-            ),
-            "versionId": str(
-                instance.active_version_id,
-            ),
-            "instanceKey": instance.instance_key,
-            "name": instance.name,
-            "status": instance.status,
+            "id":
+                str(instance.id),
+
+            "applicationId":
+                str(instance.application_id),
+
+            "versionId":
+                str(instance.active_version_id),
+
+            "instanceKey":
+                instance.instance_key,
+
+            "name":
+                instance.name,
+
+            "status":
+                instance.status,
         }
+
         for instance in instances
     ]
 
@@ -396,20 +558,24 @@ def stop_application_instance(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+
     instance = db.get(
         ApplicationInstance,
         instance_id,
     )
 
     if not instance:
+
         raise HTTPException(
             status_code=404,
             detail="Instance not found",
         )
 
-    # Stopping must still be possible if a subscription expires.
-    # Therefore stop checks RBAC only, not active entitlement.
+    # STOP remains available when subscription is
+    # suspended/cancelled/expired, so only RBAC is checked.
+
     try:
+
         require_tenant_permission(
             db=db,
             user=current_user,
@@ -418,6 +584,7 @@ def stop_application_instance(
         )
 
     except AuthorizationError as error:
+
         raise HTTPException(
             status_code=403,
             detail=str(error),
@@ -428,39 +595,48 @@ def stop_application_instance(
         .where(
             ApplicationDeployment.instance_id
             == instance.id,
+
             ApplicationDeployment.status
             == "running",
         )
         .order_by(
-            ApplicationDeployment.created_at.desc(),
+            ApplicationDeployment
+            .created_at
+            .desc(),
         )
     )
 
     if not deployment:
+
         raise HTTPException(
             status_code=409,
             detail="No running deployment found",
         )
 
     if not deployment.container_name:
+
         raise HTTPException(
             status_code=409,
             detail="Deployment has no container",
         )
 
     try:
+
         stop_container(
             deployment.container_name,
         )
 
     except DeploymentError as error:
+
         raise HTTPException(
             status_code=422,
             detail=str(error),
         ) from error
 
     deployment.status = "stopped"
+
     deployment.health_status = "stopped"
+
     deployment.stopped_at = datetime.now(
         timezone.utc,
     )

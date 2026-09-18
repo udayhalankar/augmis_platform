@@ -1,11 +1,11 @@
 import uuid
+
 from datetime import (
     datetime,
     timezone,
 )
 
 from sqlalchemy import (
-    and_,
     or_,
     select,
 )
@@ -23,6 +23,74 @@ class EntitlementError(Exception):
     pass
 
 
+def get_active_subscription_for_application(
+    db: Session,
+    tenant_id: uuid.UUID,
+    application_id: uuid.UUID,
+) -> TenantSubscription | None:
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    return db.scalar(
+        select(TenantSubscription)
+        .join(
+            ApplicationOffer,
+            ApplicationOffer.id
+            == TenantSubscription.offer_id,
+        )
+        .where(
+            TenantSubscription.tenant_id
+            == tenant_id,
+
+            TenantSubscription.status
+            == "active",
+
+            ApplicationOffer.application_id
+            == application_id,
+
+            ApplicationOffer.status
+            == "active",
+
+            TenantSubscription.starts_at
+            <= now,
+
+            or_(
+                TenantSubscription.ends_at.is_(None),
+                TenantSubscription.ends_at > now,
+            ),
+        )
+        .order_by(
+            TenantSubscription.created_at.desc()
+        )
+    )
+
+
+def require_active_subscription(
+    db: Session,
+    tenant_id: uuid.UUID,
+    application_id: uuid.UUID,
+) -> TenantSubscription:
+
+    subscription = (
+        get_active_subscription_for_application(
+            db=db,
+            tenant_id=tenant_id,
+            application_id=application_id,
+        )
+    )
+
+    if not subscription:
+
+        raise EntitlementError(
+            "Tenant does not have an active "
+            "subscription for this application."
+        )
+
+    return subscription
+
+
 def get_active_entitlement(
     db: Session,
     tenant_id: uuid.UUID,
@@ -35,9 +103,7 @@ def get_active_entitlement(
     )
 
     return db.scalar(
-        select(
-            SubscriptionEntitlement
-        )
+        select(SubscriptionEntitlement)
         .join(
             TenantSubscription,
             TenantSubscription.id
@@ -71,23 +137,20 @@ def get_active_entitlement(
             <= now,
 
             or_(
-                TenantSubscription.ends_at
-                .is_(None),
-
-                TenantSubscription.ends_at
-                > now,
+                TenantSubscription.ends_at.is_(None),
+                TenantSubscription.ends_at > now,
             ),
 
             SubscriptionEntitlement.starts_at
             <= now,
 
             or_(
-                SubscriptionEntitlement.ends_at
-                .is_(None),
-
-                SubscriptionEntitlement.ends_at
-                > now,
+                SubscriptionEntitlement.ends_at.is_(None),
+                SubscriptionEntitlement.ends_at > now,
             ),
+        )
+        .order_by(
+            SubscriptionEntitlement.created_at.desc()
         )
     )
 
