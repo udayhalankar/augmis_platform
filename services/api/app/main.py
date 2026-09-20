@@ -4,11 +4,13 @@ from services.api.app.core.config import settings
 
 from services.api.app.routes import (
     applications,
+    audit,
     auth,
     health,
     instances,
     memberships,
     offers,
+    operations,
     publishers,
     subscriptions,
     tenants,
@@ -28,6 +30,14 @@ app.include_router(
 
 app.include_router(
     health.router
+)
+
+app.include_router(
+    operations.router
+)
+
+app.include_router(
+    audit.router
 )
 
 app.include_router(

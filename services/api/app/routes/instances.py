@@ -8,6 +8,11 @@ from datetime import (
     timezone,
 )
 
+# from services.api.app import db
+from services.api.app.services.audit_service import (
+    record_audit_event,
+)
+
 from fastapi import (
     APIRouter,
     Depends,
@@ -526,6 +531,36 @@ def upgrade_application_instance(
     instance.active_version_id = target_version.id
     instance.status = "running"
 
+    record_audit_event(
+        db,
+        action="application.upgrade",
+        resource_type="application_instance",
+        resource_id=instance.id,
+        actor_user_id=current_user.id,
+        tenant_id=instance.tenant_id,
+        outcome="success",
+        message="Application instance upgraded successfully.",
+        metadata={
+        "deploymentId":
+            str(candidate.id),
+
+        "fromVersionId":
+            str(current_version.id),
+
+        "fromVersion":
+            current_version.version,
+
+        "toVersionId":
+            str(target_version.id),
+
+        "toVersion":
+            target_version.version,
+
+        "containerName":
+            candidate.container_name,
+        },
+    )
+
     db.commit()
 
     return {
@@ -572,6 +607,8 @@ def upgrade_application_instance(
     "/tenants/{tenant_id}/application-versions/{version_id}/deploy",
     status_code=201,
 )
+
+
 def deploy_application(
     tenant_id: uuid.UUID,
     version_id: uuid.UUID,
@@ -864,9 +901,13 @@ def deploy_application(
             },
         ) from error
 
-    # =====================================================
-    # 10. SUCCESS
-    # =====================================================
+        # =====================================================
+        # 10. SUCCESS
+        # =====================================================
+
+    now = datetime.now(
+        timezone.utc
+    )
 
     deployment.container_id = (
         result["container_id"]
@@ -888,13 +929,44 @@ def deploy_application(
 
     deployment.health_status = "healthy"
 
-    deployment.deployed_at = datetime.now(
-        timezone.utc,
-    )
+    deployment.deployed_at = now
 
     instance.status = "running"
 
+    record_audit_event(
+        db,
+        action="application.deploy",
+        resource_type="application_instance",
+        resource_id=instance.id,
+        actor_user_id=current_user.id,
+        tenant_id=tenant.id,
+        outcome="success",
+        message="Application instance deployed successfully.",
+        metadata={
+            "applicationId":
+                str(application.id),
+
+            "versionId":
+                str(version.id),
+
+            "version":
+                version.version,
+
+            "deploymentId":
+                str(deployment.id),
+
+            "containerName":
+                deployment.container_name,
+
+            "hostPort":
+                deployment.host_port,
+        },
+    )
+
     db.commit()
+
+    db.refresh(instance)
+    db.refresh(deployment)
 
     return {
         "status": "RUNNING",
@@ -1717,10 +1789,40 @@ def rollback_application_instance(
     candidate.deployed_at = now
 
     instance.active_version_id = (
-        rollback_version.id
-    )
+    rollback_version.id
+)
 
     instance.status = "running"
+
+    record_audit_event(
+        db,
+        action="application.rollback",
+        resource_type="application_instance",
+        resource_id=instance.id,
+        actor_user_id=current_user.id,
+        tenant_id=instance.tenant_id,
+        outcome="success",
+        message="Application instance rolled back successfully.",
+        metadata={
+        "deploymentId":
+            str(candidate.id),
+
+        "fromVersionId":
+            str(current_version.id),
+
+        "fromVersion":
+            current_version.version,
+
+        "toVersionId":
+            str(rollback_version.id),
+
+        "toVersion":
+            rollback_version.version,
+
+        "containerName":
+            candidate.container_name,
+        },
+    )
 
     db.commit()
 
@@ -1897,6 +1999,27 @@ def stop_application_instance(
     deployment.stopped_at = now
 
     instance.status = "stopped"
+
+    record_audit_event(
+        db,
+        action="application.stop",
+        resource_type="application_instance",
+        resource_id=instance.id,
+        actor_user_id=current_user.id,
+        tenant_id=instance.tenant_id,
+        outcome="success",
+        message="Application instance stopped successfully.",
+        metadata={
+            "deploymentId":
+                str(deployment.id),
+
+            "versionId":
+                str(instance.active_version_id),
+
+            "containerName":
+                deployment.container_name,
+        },
+    )
 
     db.commit()
 
@@ -2214,7 +2337,7 @@ def restart_application_instance(
             },
         ) from error
 
-    # =====================================================
+        # =====================================================
     # 10. PROMOTE RESTART DEPLOYMENT
     # =====================================================
 
@@ -2239,10 +2362,39 @@ def restart_application_instance(
     )
 
     deployment.status = "running"
+
     deployment.health_status = "healthy"
+
     deployment.deployed_at = now
 
     instance.status = "running"
+
+    record_audit_event(
+        db,
+        action="application.restart",
+        resource_type="application_instance",
+        resource_id=instance.id,
+        actor_user_id=current_user.id,
+        tenant_id=instance.tenant_id,
+        outcome="success",
+        message="Application instance restarted successfully.",
+        metadata={
+            "deploymentId":
+                str(deployment.id),
+
+            "versionId":
+                str(version.id),
+
+            "version":
+                version.version,
+
+            "containerName":
+                deployment.container_name,
+
+            "hostPort":
+                deployment.host_port,
+        },
+    )
 
     db.commit()
 

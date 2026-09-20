@@ -281,3 +281,71 @@ def stop_container(
             container_name
         ]
     )
+
+def get_container_logs(
+    container_name: str,
+    tail: int = 200,
+) -> str:
+
+    if tail < 1:
+        tail = 1
+
+    if tail > 2000:
+        tail = 2000
+
+    try:
+
+        result = subprocess.run(
+            [
+                "docker",
+                "logs",
+                "--tail",
+                str(tail),
+                "--timestamps",
+                container_name,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    except subprocess.TimeoutExpired as error:
+
+        raise DeploymentError(
+            "Docker logs command timed out."
+        ) from error
+
+    except OSError as error:
+
+        raise DeploymentError(
+            f"Could not execute Docker: {error}"
+        ) from error
+
+    if result.returncode != 0:
+
+        raise DeploymentError(
+            (
+                result.stderr
+                or result.stdout
+                or "Could not retrieve container logs."
+            ).strip()
+        )
+
+    # Docker preserves stdout/stderr separately.
+    # Combine both so application errors are not lost.
+
+    parts = []
+
+    if result.stdout:
+
+        parts.append(
+            result.stdout.rstrip()
+        )
+
+    if result.stderr:
+
+        parts.append(
+            result.stderr.rstrip()
+        )
+
+    return "\n".join(parts)

@@ -10,6 +10,9 @@ from services.api.app.models.platform import (
     Tenant,
 )
 
+from services.api.app.models.audit import (
+    AuditEvent,
+)
 
 from services.api.app.models.iam import (
     Permission,
@@ -41,6 +44,7 @@ __all__ = [
     "ApplicationDeployment",
     "ApplicationOffer",
     "OfferEntitlement",
+    "AuditEvent",
     "TenantSubscription",
     "SubscriptionEntitlement",
     "User",

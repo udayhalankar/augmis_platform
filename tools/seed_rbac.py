@@ -25,6 +25,9 @@ PERMISSIONS = {
     "application.instance.stop":
         "Stop application instances",
 
+    "audit.view":
+    "View tenant audit events",
+
     "publisher.manage":
         "Manage publisher",
 
@@ -58,7 +61,8 @@ ROLES = {
             "application.instance.view",
             "application.instance.stop",
             "subscription.view",
-            "subscription.manage"
+            "subscription.manage",
+            "audit.view"
         ]
     },
 
