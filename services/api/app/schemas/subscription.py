@@ -3,6 +3,7 @@ from pydantic import (
     Field,
 )
 
+import uuid
 
 class SubscriptionCreate(BaseModel):
     pass
@@ -14,3 +15,7 @@ class SubscriptionSuspendRequest(BaseModel):
         default=None,
         max_length=500,
     )
+
+class SubscriptionChangeOfferRequest(BaseModel):
+
+    offer_id: uuid.UUID

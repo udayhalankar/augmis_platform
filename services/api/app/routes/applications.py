@@ -744,3 +744,265 @@ def get_build(
             build.finished_at
     }
 
+@router.get(
+    "/applications/{application_id}/versions"
+)
+def list_application_versions(
+    application_id: uuid.UUID,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+
+    # =====================================================
+    # 1. APPLICATION
+    # =====================================================
+
+    application = db.get(
+        Application,
+        application_id,
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    # =====================================================
+    # 2. PUBLISHER AUTHORIZATION
+    # =====================================================
+
+    try:
+
+        require_publisher_permission(
+            db=db,
+            user=current_user,
+            publisher_id=application.publisher_id,
+            permission_code="application.manage",
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 3. VERSIONS
+    # =====================================================
+
+    versions = list(
+        db.scalars(
+            select(ApplicationVersion)
+            .where(
+                ApplicationVersion.application_id
+                == application.id
+            )
+            .order_by(
+                ApplicationVersion.created_at.desc()
+            )
+        )
+    )
+
+    # =====================================================
+    # 4. RESPONSE
+    # =====================================================
+
+    return {
+        "application": {
+            "id":
+                str(application.id),
+
+            "publisherId":
+                str(application.publisher_id),
+
+            "appKey":
+                application.app_key,
+
+            "name":
+                application.name,
+
+            "status":
+                application.status,
+        },
+
+        "count":
+            len(versions),
+
+        "items": [
+            {
+                "id":
+                    str(version.id),
+
+                "version":
+                    version.version,
+
+                "status":
+                    version.status,
+
+                "buildType":
+                    version.build_type,
+
+                "deploymentMode":
+                    version.deployment_mode,
+
+                "createdAt":
+                    version.created_at,
+            }
+
+            for version in versions
+        ],
+    }
+
+@router.get(
+    "/application-versions/{version_id}"
+)
+def get_application_version(
+    version_id: uuid.UUID,
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+
+    # =====================================================
+    # 1. VERSION
+    # =====================================================
+
+    version = db.get(
+        ApplicationVersion,
+        version_id,
+    )
+
+    if not version:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application version not found",
+        )
+
+    # =====================================================
+    # 2. APPLICATION
+    # =====================================================
+
+    application = db.get(
+        Application,
+        version.application_id,
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Application version references "
+                "a missing application."
+            ),
+        )
+
+    # =====================================================
+    # 3. PUBLISHER AUTHORIZATION
+    # =====================================================
+
+    try:
+
+        require_publisher_permission(
+            db=db,
+            user=current_user,
+            publisher_id=application.publisher_id,
+            permission_code="application.manage",
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 4. LATEST BUILD
+    # =====================================================
+
+    latest_build = db.scalar(
+        select(ApplicationBuild)
+        .where(
+            ApplicationBuild.application_version_id
+            == version.id
+        )
+        .order_by(
+            ApplicationBuild.created_at.desc()
+        )
+    )
+
+    # =====================================================
+    # 5. RESPONSE
+    # =====================================================
+
+    return {
+        "id":
+            str(version.id),
+
+        "application": {
+            "id":
+                str(application.id),
+
+            "publisherId":
+                str(application.publisher_id),
+
+            "appKey":
+                application.app_key,
+
+            "name":
+                application.name,
+        },
+
+        "version":
+            version.version,
+
+        "status":
+            version.status,
+
+        "buildType":
+            version.build_type,
+
+        "deploymentMode":
+            version.deployment_mode,
+
+        "manifest":
+            version.manifest,
+
+        "latestBuild": (
+            {
+                "id":
+                    str(latest_build.id),
+
+                "status":
+                    latest_build.status,
+
+                "imageRef":
+                    latest_build.image_ref,
+
+                "startedAt":
+                    latest_build.started_at,
+
+                "finishedAt":
+                    latest_build.finished_at,
+            }
+
+            if latest_build
+
+            else None
+        ),
+
+        "createdAt":
+            version.created_at,
+    }
