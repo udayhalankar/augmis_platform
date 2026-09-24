@@ -1,5 +1,16 @@
 import uuid
 
+import hashlib
+import secrets
+import threading
+import time
+
+from pathlib import Path
+
+from urllib.parse import (
+    quote,
+)
+
 from datetime import (
     datetime,
     timezone,
@@ -9,6 +20,12 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Request,
+)
+
+from fastapi.responses import (
+    HTMLResponse,
+    RedirectResponse,
 )
 
 from sqlalchemy import (
@@ -40,6 +57,7 @@ from services.api.app.models.iam import (
 from services.api.app.models.platform import (
     Application,
     ApplicationInstance,
+    ApplicationPackage,
     ApplicationVersion,
     Tenant,
 )
@@ -71,7 +89,9 @@ from services.api.app.services.subscription_lifecycle_service import (
 
 from services.api.app.services.version_policy_service import (
     VersionPolicyError,
+    is_version_technically_ready,
     parse_version,
+    require_subscription_version_allowed,
     resolve_subscription_baseline,
 )
 
@@ -80,6 +100,891 @@ router = APIRouter(
     prefix="/api/v1",
     tags=["Subscriptions"],
 )
+
+# =========================================================
+# STEP 3C-3B — STATIC APPLICATION RUNTIME
+# =========================================================
+
+_STATIC_RUNTIME_SESSION_SECONDS = (
+    8 * 60 * 60
+)
+
+_STATIC_RUNTIME_TICKET_SECONDS = 60
+
+_STATIC_RUNTIME_SESSIONS: dict[
+    str,
+    dict,
+] = {}
+
+_STATIC_RUNTIME_LOCK = (
+    threading.Lock()
+)
+
+
+def _static_runtime_hash(
+    value: str,
+) -> str:
+
+    return hashlib.sha256(
+        value.encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _static_runtime_cookie_name(
+    runtime_id: str,
+) -> str:
+
+    safe = "".join(
+        character
+        for character in runtime_id
+        if (
+            character.isalnum()
+            or character in "-_"
+        )
+    )
+
+    return (
+        "augmis_static_"
+        + safe[:24]
+    )
+
+
+def _cleanup_static_runtime_sessions() -> None:
+
+    now = time.time()
+
+    with _STATIC_RUNTIME_LOCK:
+
+        expired = [
+            runtime_id
+
+            for runtime_id, session
+            in _STATIC_RUNTIME_SESSIONS.items()
+
+            if float(
+                session.get(
+                    "expires_at",
+                    0,
+                )
+            )
+            <= now
+        ]
+
+        for runtime_id in expired:
+
+            _STATIC_RUNTIME_SESSIONS.pop(
+                runtime_id,
+                None,
+            )
+
+
+def _subscription_time_is_active(
+    subscription: TenantSubscription,
+) -> bool:
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    if (
+        subscription.starts_at
+        and subscription.starts_at
+        > now
+    ):
+        return False
+
+    if (
+        subscription.ends_at
+        and subscription.ends_at
+        <= now
+    ):
+        return False
+
+    return True
+
+
+def _entitlement_time_is_active(
+    entitlement: SubscriptionEntitlement,
+) -> bool:
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    if (
+        entitlement.starts_at
+        and entitlement.starts_at
+        > now
+    ):
+        return False
+
+    if (
+        entitlement.ends_at
+        and entitlement.ends_at
+        <= now
+    ):
+        return False
+
+    return True
+
+
+def _resolve_static_subscription_access(
+    *,
+    db: Session,
+    tenant: Tenant,
+    application: Application,
+    subscription_id: uuid.UUID | None = None,
+):
+
+    query = (
+        select(
+            TenantSubscription
+        )
+        .join(
+            ApplicationOffer,
+            ApplicationOffer.id
+            == TenantSubscription.offer_id,
+        )
+        .where(
+            TenantSubscription.tenant_id
+            == tenant.id,
+
+            TenantSubscription.status
+            == "active",
+
+            ApplicationOffer.application_id
+            == application.id,
+        )
+        .order_by(
+            TenantSubscription.created_at
+            .desc()
+        )
+    )
+
+    if subscription_id is not None:
+
+        query = query.where(
+            TenantSubscription.id
+            == subscription_id
+        )
+
+    subscription = db.scalar(
+        query
+    )
+
+    if (
+        not subscription
+        or not _subscription_time_is_active(
+            subscription
+        )
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Tenant does not have an active "
+                "subscription for this application."
+            ),
+        )
+
+    entitlement = db.scalar(
+        select(
+            SubscriptionEntitlement
+        )
+        .where(
+            SubscriptionEntitlement.subscription_id
+            == subscription.id,
+
+            SubscriptionEntitlement.code
+            == "application.deploy",
+
+            SubscriptionEntitlement.status
+            == "active",
+        )
+        .order_by(
+            SubscriptionEntitlement.created_at
+            .desc()
+        )
+    )
+
+    if (
+        not entitlement
+        or not _entitlement_time_is_active(
+            entitlement
+        )
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Tenant does not have an active "
+                "application.deploy entitlement."
+            ),
+        )
+
+    if not subscription.baseline_version_id:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Subscription has no baseline version."
+            ),
+        )
+
+    version = db.get(
+        ApplicationVersion,
+        subscription.baseline_version_id,
+    )
+
+    if not version:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Subscription baseline version "
+                "no longer exists."
+            ),
+        )
+
+    if (
+        version.application_id
+        != application.id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Subscription version belongs "
+                "to another application."
+            ),
+        )
+
+    if str(
+        version.build_type or ""
+    ).lower() != "static_web":
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This application is not a "
+                "static web application."
+            ),
+        )
+
+    if not is_version_technically_ready(
+    version
+    ):
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Static application version "
+                "is not runtime-ready."
+            ),
+        )
+
+    try:
+
+        require_subscription_version_allowed(
+            db=db,
+            subscription=subscription,
+            target_version=version,
+        )
+
+    except VersionPolicyError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    package = db.scalar(
+        select(
+            ApplicationPackage
+        )
+        .where(
+            ApplicationPackage.application_version_id
+            == version.id,
+
+            ApplicationPackage.status
+            == "validated",
+        )
+        .order_by(
+            ApplicationPackage.created_at
+            .desc()
+        )
+    )
+
+    if not package:
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Static application package "
+                "not found."
+            ),
+        )
+
+    source_path = Path(
+        package.stored_path
+    )
+
+    if not source_path.exists():
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Static application file is "
+                "missing from package storage."
+            ),
+        )
+
+    return (
+        subscription,
+        entitlement,
+        version,
+        package,
+        source_path,
+    )
+
+
+def _issue_static_runtime_url(
+    *,
+    request: Request,
+    current_user: User,
+    tenant: Tenant,
+    application: Application,
+    subscription: TenantSubscription,
+    version: ApplicationVersion,
+) -> str:
+
+    _cleanup_static_runtime_sessions()
+
+    runtime_id = (
+        secrets.token_urlsafe(
+            24
+        )
+    )
+
+    ticket = (
+        secrets.token_urlsafe(
+            32
+        )
+    )
+
+    now = time.time()
+
+    with _STATIC_RUNTIME_LOCK:
+
+        _STATIC_RUNTIME_SESSIONS[
+            runtime_id
+        ] = {
+            "user_id":
+                current_user.id,
+
+            "tenant_id":
+                tenant.id,
+
+            "application_id":
+                application.id,
+
+            "subscription_id":
+                subscription.id,
+
+            "version_id":
+                version.id,
+
+            "session_hash":
+                _static_runtime_hash(
+                    ticket
+                ),
+
+            "ticket_used":
+                False,
+
+            "ticket_expires_at":
+                now
+                + _STATIC_RUNTIME_TICKET_SECONDS,
+
+            "expires_at":
+                now
+                + _STATIC_RUNTIME_SESSION_SECONDS,
+        }
+
+    base_url = str(
+        request.base_url
+    ).rstrip("/")
+
+    return (
+        f"{base_url}"
+        f"/api/v1/static-runtime/"
+        f"{runtime_id}/"
+        f"?ticket={quote(ticket)}"
+    )
+
+
+def _validate_static_runtime_session(
+    *,
+    db: Session,
+    runtime_id: str,
+    cookie_secret: str,
+):
+
+    _cleanup_static_runtime_sessions()
+
+    with _STATIC_RUNTIME_LOCK:
+
+        session = (
+            _STATIC_RUNTIME_SESSIONS.get(
+                runtime_id
+            )
+        )
+
+        if session:
+            session = dict(
+                session
+            )
+
+    if not session:
+
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Static runtime session "
+                "is invalid or expired."
+            ),
+        )
+
+    if (
+        not cookie_secret
+        or not secrets.compare_digest(
+            _static_runtime_hash(
+                cookie_secret
+            ),
+            str(
+                session.get(
+                    "session_hash",
+                    "",
+                )
+            ),
+        )
+    ):
+
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Static runtime session "
+                "cookie is invalid."
+            ),
+        )
+
+    user = db.get(
+        User,
+        session["user_id"],
+    )
+
+    if not user:
+
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Static runtime user "
+                "no longer exists."
+            ),
+        )
+
+    tenant = db.get(
+        Tenant,
+        session["tenant_id"],
+    )
+
+    if not tenant:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Tenant not found",
+        )
+
+    if tenant.status != "active":
+
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant is not active",
+        )
+
+    application = db.get(
+        Application,
+        session[
+            "application_id"
+        ],
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    try:
+
+        require_tenant_permission(
+            db=db,
+            user=user,
+            tenant_id=tenant.id,
+            permission_code="subscription.view",
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    (
+        subscription,
+        entitlement,
+        version,
+        package,
+        source_path,
+    ) = _resolve_static_subscription_access(
+        db=db,
+        tenant=tenant,
+        application=application,
+        subscription_id=(
+            session[
+                "subscription_id"
+            ]
+        ),
+    )
+
+    if version.id != session["version_id"]:
+
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Static runtime version "
+                "validation failed."
+            ),
+        )
+
+    return {
+        "session":
+            session,
+
+        "user":
+            user,
+
+        "tenant":
+            tenant,
+
+        "application":
+            application,
+
+        "subscription":
+            subscription,
+
+        "entitlement":
+            entitlement,
+
+        "version":
+            version,
+
+        "package":
+            package,
+
+        "source_path":
+            source_path,
+    }
+
+
+@router.post(
+    "/tenants/{tenant_id}/applications/{application_id}/open-static"
+)
+def open_static_application(
+    tenant_id: uuid.UUID,
+    application_id: uuid.UUID,
+    request: Request,
+
+    db: Session = Depends(
+        get_db
+    ),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+
+    tenant = db.get(
+        Tenant,
+        tenant_id,
+    )
+
+    if not tenant:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Tenant not found",
+        )
+
+    if tenant.status != "active":
+
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant is not active",
+        )
+
+    application = db.get(
+        Application,
+        application_id,
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    try:
+
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=tenant.id,
+            permission_code="subscription.view",
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    (
+        subscription,
+        _entitlement,
+        version,
+        _package,
+        _source_path,
+    ) = _resolve_static_subscription_access(
+        db=db,
+        tenant=tenant,
+        application=application,
+    )
+
+    runtime_url = (
+        _issue_static_runtime_url(
+            request=request,
+            current_user=current_user,
+            tenant=tenant,
+            application=application,
+            subscription=subscription,
+            version=version,
+        )
+    )
+
+    return {
+        "status":
+            "STATIC",
+
+        "tenantId":
+            str(tenant.id),
+
+        "applicationId":
+            str(application.id),
+
+        "subscriptionId":
+            str(subscription.id),
+
+        "versionId":
+            str(version.id),
+
+        "version":
+            version.version,
+
+        "runtimeUrl":
+            runtime_url,
+    }
+
+
+@router.get(
+    "/static-runtime/{runtime_id}/",
+    response_class=HTMLResponse,
+)
+def static_runtime(
+    runtime_id: str,
+    request: Request,
+
+    db: Session = Depends(
+        get_db
+    ),
+):
+
+    cookie_name = (
+        _static_runtime_cookie_name(
+            runtime_id
+        )
+    )
+
+    ticket = str(
+        request.query_params.get(
+            "ticket",
+            "",
+        )
+    ).strip()
+
+    if ticket:
+
+        _cleanup_static_runtime_sessions()
+
+        with _STATIC_RUNTIME_LOCK:
+
+            session = (
+                _STATIC_RUNTIME_SESSIONS.get(
+                    runtime_id
+                )
+            )
+
+            now = time.time()
+
+            valid_ticket = (
+                bool(session)
+                and not bool(
+                    session.get(
+                        "ticket_used"
+                    )
+                )
+                and float(
+                    session.get(
+                        "ticket_expires_at",
+                        0,
+                    )
+                )
+                > now
+                and secrets.compare_digest(
+                    _static_runtime_hash(
+                        ticket
+                    ),
+                    str(
+                        session.get(
+                            "session_hash",
+                            "",
+                        )
+                    ),
+                )
+            )
+
+            if valid_ticket:
+
+                session[
+                    "ticket_used"
+                ] = True
+
+        if not valid_ticket:
+
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Static runtime launch "
+                    "ticket is invalid or expired."
+                ),
+            )
+
+        clean_url = (
+            f"/api/v1/static-runtime/"
+            f"{runtime_id}/"
+        )
+
+        response = RedirectResponse(
+            url=clean_url,
+            status_code=303,
+        )
+
+        response.set_cookie(
+            key=cookie_name,
+            value=ticket,
+            max_age=(
+                _STATIC_RUNTIME_SESSION_SECONDS
+            ),
+            httponly=True,
+            secure=(
+                request.url.scheme
+                == "https"
+            ),
+            samesite="lax",
+            path=(
+                f"/api/v1/static-runtime/"
+                f"{runtime_id}"
+            ),
+        )
+
+        return response
+
+    cookie_secret = str(
+        request.cookies.get(
+            cookie_name,
+            "",
+        )
+    ).strip()
+
+    context = (
+        _validate_static_runtime_session(
+            db=db,
+            runtime_id=runtime_id,
+            cookie_secret=(
+                cookie_secret
+            ),
+        )
+    )
+
+    source_path = context[
+        "source_path"
+    ]
+
+    try:
+
+        html = source_path.read_text(
+            encoding="utf-8"
+        )
+
+    except UnicodeDecodeError as error:
+
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Stored static application "
+                "is not valid UTF-8 HTML."
+            ),
+        ) from error
+
+    return HTMLResponse(
+        content=html,
+        headers={
+            "Cache-Control":
+                "no-store",
+
+            "X-Content-Type-Options":
+                "nosniff",
+
+            "Referrer-Policy":
+                "no-referrer",
+
+            "Content-Security-Policy": (
+                "default-src 'self' data: blob:; "
+                "script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data: blob:; "
+                "font-src 'self' data:; "
+                "connect-src 'self'; "
+                "object-src 'none'; "
+                "base-uri 'none'; "
+                "form-action 'self'; "
+                "frame-ancestors 'self'"
+            ),
+        },
+    )
 
 
 # =========================================================
@@ -462,6 +1367,317 @@ def list_subscriptions(
         ) in rows
     ]
 
+@router.get(
+    "/tenants/{tenant_id}/applications"
+)
+def list_tenant_available_applications(
+    tenant_id: uuid.UUID,
+
+    db: Session = Depends(
+        get_db
+    ),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+    """
+    Tenant-safe application catalog.
+
+    Access is derived from the tenant's ACTIVE commercial
+    subscription snapshot and ACTIVE application.deploy
+    entitlement.
+
+    IMPORTANT:
+    We deliberately do NOT require the current mutable offer
+    to still be active and we do NOT require the application
+    version to still be commercially published.
+
+    Reason:
+    once a tenant has a valid active subscription, later
+    publisher retirement prevents NEW sales but should not
+    silently remove an existing tenant's contractual access.
+
+    Runtime launch enforcement remains a separate concern.
+    """
+
+    tenant = db.get(
+        Tenant,
+        tenant_id,
+    )
+
+    if not tenant:
+        raise HTTPException(
+            status_code=404,
+            detail="Tenant not found",
+        )
+
+    try:
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=tenant.id,
+            permission_code="subscription.view",
+        )
+
+    except AuthorizationError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    rows = db.execute(
+        select(
+            TenantSubscription,
+            ApplicationOffer,
+            Application,
+            SubscriptionEntitlement,
+        )
+        .join(
+            ApplicationOffer,
+            ApplicationOffer.id
+            == TenantSubscription.offer_id,
+        )
+        .join(
+            Application,
+            Application.id
+            == ApplicationOffer.application_id,
+        )
+        .join(
+            SubscriptionEntitlement,
+            SubscriptionEntitlement.subscription_id
+            == TenantSubscription.id,
+        )
+        .where(
+            TenantSubscription.tenant_id
+            == tenant.id,
+
+            TenantSubscription.status
+            == "active",
+
+            (
+                TenantSubscription.starts_at
+                .is_(None)
+                |
+                (
+                    TenantSubscription.starts_at
+                    <= now
+                )
+            ),
+
+            (
+                TenantSubscription.ends_at
+                .is_(None)
+                |
+                (
+                    TenantSubscription.ends_at
+                    > now
+                )
+            ),
+
+            SubscriptionEntitlement.code
+            == "application.deploy",
+
+            SubscriptionEntitlement.status
+            == "active",
+
+            (
+                SubscriptionEntitlement.starts_at
+                .is_(None)
+                |
+                (
+                    SubscriptionEntitlement.starts_at
+                    <= now
+                )
+            ),
+
+            (
+                SubscriptionEntitlement.ends_at
+                .is_(None)
+                |
+                (
+                    SubscriptionEntitlement.ends_at
+                    > now
+                )
+            ),
+        )
+        .order_by(
+            Application.name.asc()
+        )
+    ).all()
+
+    items = []
+
+    for (
+        subscription,
+        offer,
+        application,
+        deploy_entitlement,
+    ) in rows:
+
+        version = None
+
+        if subscription.baseline_version_id:
+            version = db.get(
+                ApplicationVersion,
+                subscription.baseline_version_id,
+            )
+
+        if not version:
+            continue
+
+        technical_status = str(
+            version.status or ""
+        ).lower()
+
+        build_type = str(
+            version.build_type or ""
+        ).lower()
+
+        runtime_ready = (
+            technical_status == "validated"
+            if build_type == "static_web"
+            else technical_status == "image_ready"
+        )
+
+        items.append(
+            {
+                "subscriptionId":
+                    str(subscription.id),
+
+                "tenant": {
+                    "id":
+                        str(tenant.id),
+
+                    "name":
+                        tenant.name,
+
+                    "slug":
+                        tenant.slug,
+                },
+
+                "application": {
+                    "id":
+                        str(application.id),
+
+                    "publisherId":
+                        str(application.publisher_id),
+
+                    "appKey":
+                        application.app_key,
+
+                    "name":
+                        application.name,
+
+                    "description":
+                        application.description,
+
+                    "status":
+                        application.status,
+                },
+
+                "offer": {
+                    "id":
+                        str(offer.id),
+
+                    "offerKey":
+                        offer.offer_key,
+
+                    "name":
+                        offer.name,
+
+                    "deliveryType":
+                        offer.delivery_type,
+
+                    "currentStatus":
+                        offer.status,
+                },
+
+                "subscription": {
+                    "status":
+                        subscription.status,
+
+                    "startsAt":
+                        subscription.starts_at,
+
+                    "endsAt":
+                        subscription.ends_at,
+
+                    "versionPolicy":
+                        subscription.version_policy,
+
+                    "autoUpgrade":
+                        subscription.auto_upgrade,
+                },
+
+                "version": {
+                    "id":
+                        str(version.id),
+
+                    "version":
+                        version.version,
+
+                    "technicalStatus":
+                        version.status,
+
+                    "publicationStatus":
+                        getattr(
+                            version,
+                            "publication_status",
+                            "draft",
+                        ),
+
+                    "buildType":
+                        version.build_type,
+
+                    "deploymentMode":
+                        version.deployment_mode,
+                },
+
+                "entitlement": {
+                    "code":
+                        deploy_entitlement.code,
+
+                    "status":
+                        deploy_entitlement.status,
+
+                    "value":
+                        deploy_entitlement.value_json,
+                },
+
+                "available":
+                    True,
+
+                "runtimeReady":
+                    runtime_ready,
+            }
+        )
+
+    return {
+        "tenant": {
+            "id":
+                str(tenant.id),
+
+            "name":
+                tenant.name,
+
+            "slug":
+                tenant.slug,
+
+            "status":
+                tenant.status,
+        },
+
+        "count":
+            len(items),
+
+        "items":
+            items,
+    }
 
 
 
@@ -1396,8 +2612,9 @@ def change_subscription_offer(
                     existing_baseline.application_id
                     == application.id
                     and
-                    existing_baseline.status
-                    == "image_ready"
+                    is_version_technically_ready(
+                        existing_baseline
+                    )
                 ):
 
                     target_baseline = (

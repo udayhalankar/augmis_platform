@@ -1,4 +1,6 @@
+# services/api/app/routes/offers.py
 import uuid
+
 from datetime import (
     datetime,
     timezone,
@@ -32,6 +34,7 @@ from services.api.app.models.iam import (
 
 from services.api.app.models.platform import (
     Application,
+    ApplicationVersion,
 )
 
 from services.api.app.schemas.offer import (
@@ -39,14 +42,14 @@ from services.api.app.schemas.offer import (
     OfferUpdate,
 )
 
-from services.api.app.services.version_policy_service import (
-    VersionPolicyError,
-    validate_offer_version_policy,
-)
-
 from services.api.app.services.authorization_service import (
     AuthorizationError,
     require_publisher_permission,
+)
+
+from services.api.app.services.version_policy_service import (
+    VersionPolicyError,
+    validate_offer_version_policy,
 )
 
 
@@ -56,20 +59,330 @@ router = APIRouter(
 )
 
 
-@router.post(
-    "/applications/{application_id}/offers",
-    status_code=201,
-)
-def create_offer(
-    application_id: uuid.UUID,
-    payload: OfferCreate,
+# =========================================================
+# HELPER - SERIALIZE OFFER
+# =========================================================
 
+def serialize_offer(
+    db: Session,
+    offer: ApplicationOffer,
+) -> dict:
+
+    entitlements = list(
+        db.scalars(
+            select(
+                OfferEntitlement
+            )
+            .where(
+                OfferEntitlement.offer_id
+                == offer.id
+            )
+            .order_by(
+                OfferEntitlement.code
+            )
+        )
+    )
+
+    return {
+        "id":
+            str(offer.id),
+
+        "applicationId":
+            str(
+                offer.application_id
+            ),
+
+        "offerKey":
+            offer.offer_key,
+
+        "name":
+            offer.name,
+
+        "description":
+            offer.description,
+
+        "deliveryType":
+            offer.delivery_type,
+
+        "status":
+            offer.status,
+
+        "versionPolicy":
+            offer.version_policy,
+
+        "pinnedVersionId": (
+            str(
+                offer.pinned_version_id
+            )
+            if offer.pinned_version_id
+            else None
+        ),
+
+        "autoUpgrade":
+            offer.auto_upgrade,
+
+        "entitlements": [
+            {
+                "id":
+                    str(
+                        entitlement.id
+                    ),
+
+                "code":
+                    entitlement.code,
+
+                "value":
+                    entitlement.value_json,
+
+                "status":
+                    entitlement.status,
+            }
+
+            for entitlement
+            in entitlements
+        ],
+
+        "activatedAt":
+            offer.activated_at,
+
+        "createdAt":
+            offer.created_at,
+
+        "updatedAt":
+            offer.updated_at,
+    }
+
+
+@router.get(
+    "/marketplace/offers"
+)
+def list_marketplace_offers(
     db: Session = Depends(get_db),
 
     current_user: User = Depends(
         get_current_user
     ),
 ):
+    """
+    Authenticated marketplace catalog.
+
+    Only exposes:
+    - active offers
+    - whose application is published
+    - with a published application version
+
+    It does NOT grant a tenant subscription.
+    Subscription is Step 3B.
+    """
+
+    offers = list(
+        db.scalars(
+            select(
+                ApplicationOffer
+            )
+            .where(
+                ApplicationOffer.status
+                == "active"
+            )
+            .order_by(
+                ApplicationOffer.created_at
+                .desc()
+            )
+        )
+    )
+
+    result = []
+
+    for offer in offers:
+
+        application = db.get(
+            Application,
+            offer.application_id
+        )
+
+        if not application:
+            continue
+
+        if str(
+            application.status or ""
+        ).lower() != "published":
+            continue
+
+
+
+        # ==============================================
+        # RESOLVE THE MARKETPLACE VERSION
+        # ==============================================
+
+        version = None
+
+        if offer.version_policy == "pinned":
+
+            if not offer.pinned_version_id:
+                continue
+
+            candidate = db.get(
+                ApplicationVersion,
+                offer.pinned_version_id
+            )
+
+            if (
+                candidate
+                and
+                candidate.application_id
+                    == application.id
+                and
+                str(
+                    candidate.publication_status or ""
+                ).lower()
+                    == "published"
+            ):
+                version = candidate
+
+        else:
+
+            version = db.scalar(
+                select(
+                    ApplicationVersion
+                )
+                .where(
+                    ApplicationVersion.application_id
+                        == application.id,
+
+                    ApplicationVersion.publication_status
+                        == "published",
+                )
+                .order_by(
+                    ApplicationVersion.created_at
+                        .desc()
+                )
+            )
+
+        if not version:
+            continue
+
+
+        entitlements = list(
+            db.scalars(
+                select(
+                    OfferEntitlement
+                )
+                .where(
+                    OfferEntitlement.offer_id
+                        == offer.id,
+
+                    OfferEntitlement.status
+                        == "active",
+                )
+                .order_by(
+                    OfferEntitlement.code
+                )
+            )
+        )
+
+
+        result.append(
+            {
+                "id":
+                    str(offer.id),
+
+                "offerKey":
+                    offer.offer_key,
+
+                "name":
+                    offer.name,
+
+                "description":
+                    offer.description,
+
+                "deliveryType":
+                    offer.delivery_type,
+
+                "status":
+                    offer.status,
+
+                "versionPolicy":
+                    offer.version_policy,
+
+                "autoUpgrade":
+                    offer.auto_upgrade,
+
+                "application": {
+                    "id":
+                        str(application.id),
+
+                    "appKey":
+                        application.app_key,
+
+                    "name":
+                        application.name,
+
+                    "description":
+                        application.description,
+
+                    "status":
+                        application.status,
+                },
+
+                "version": {
+                    "id":
+                        str(version.id),
+
+                    "version":
+                        version.version,
+
+                    "buildType":
+                        version.build_type,
+
+                    "deploymentMode":
+                        version.deployment_mode,
+
+                    "status":
+                        version.status,
+
+                    "publicationStatus":
+                        version.publication_status,
+                },
+
+                "entitlements": [
+                    {
+                        "code":
+                            entitlement.code,
+
+                        "value":
+                            entitlement.value_json,
+                    }
+
+                    for entitlement
+                    in entitlements
+                ],
+            }
+        )
+
+    return result
+
+# =========================================================
+# LIST APPLICATION OFFERS
+# =========================================================
+
+@router.get(
+    "/applications/{application_id}/offers"
+)
+def list_application_offers(
+    application_id: uuid.UUID,
+
+    db: Session = Depends(
+        get_db
+    ),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+
+    # =====================================================
+    # 1. APPLICATION
+    # =====================================================
 
     application = db.get(
         Application,
@@ -83,12 +396,20 @@ def create_offer(
             detail="Application not found",
         )
 
+    # =====================================================
+    # 2. AUTHORIZATION
+    # =====================================================
+
     try:
 
         require_publisher_permission(
             db=db,
             user=current_user,
-            publisher_id=application.publisher_id,
+
+            publisher_id=(
+                application.publisher_id
+            ),
+
             permission_code="offer.manage",
         )
 
@@ -97,10 +418,110 @@ def create_offer(
         raise HTTPException(
             status_code=403,
             detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 3. OFFERS
+    # =====================================================
+
+    offers = list(
+        db.scalars(
+            select(
+                ApplicationOffer
+            )
+            .where(
+                ApplicationOffer.application_id
+                == application.id
+            )
+            .order_by(
+                ApplicationOffer.created_at.desc()
+            )
+        )
+    )
+
+    # =====================================================
+    # 4. RESPONSE
+    # =====================================================
+
+    return [
+        serialize_offer(
+            db,
+            offer,
         )
 
+        for offer
+        in offers
+    ]
+
+
+# =========================================================
+# CREATE OFFER
+# =========================================================
+
+@router.post(
+    "/applications/{application_id}/offers",
+    status_code=201,
+)
+def create_offer(
+    application_id: uuid.UUID,
+
+    payload: OfferCreate,
+
+    db: Session = Depends(
+        get_db
+    ),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+
+    # =====================================================
+    # 1. APPLICATION
+    # =====================================================
+
+    application = db.get(
+        Application,
+        application_id,
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    # =====================================================
+    # 2. AUTHORIZATION
+    # =====================================================
+
+    try:
+
+        require_publisher_permission(
+            db=db,
+            user=current_user,
+            publisher_id=(
+                application.publisher_id
+            ),
+            permission_code="offer.manage",
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 3. DUPLICATE KEY
+    # =====================================================
+
     existing = db.scalar(
-        select(ApplicationOffer)
+        select(
+            ApplicationOffer
+        )
         .where(
             ApplicationOffer.application_id
             == application.id,
@@ -114,31 +535,70 @@ def create_offer(
 
         raise HTTPException(
             status_code=409,
-            detail="Offer key already exists for this application",
+            detail=(
+                "Offer key already exists "
+                "for this application"
+            ),
         )
 
-    if payload.delivery_type != "hosted_dedicated":
+    # =====================================================
+    # 4. DELIVERY TYPE
+    # =====================================================
+
+    if (
+        payload.delivery_type
+        != "hosted_dedicated"
+    ):
 
         raise HTTPException(
             status_code=422,
             detail=(
-                "Only hosted_dedicated is currently supported"
+                "Only hosted_dedicated "
+                "is currently supported"
             ),
         )
+
+    # =====================================================
+    # 5. ENTITLEMENTS
+    # =====================================================
 
     if not payload.entitlements:
 
         raise HTTPException(
             status_code=422,
-            detail="Offer must define at least one entitlement",
+            detail=(
+                "Offer must define at least "
+                "one entitlement"
+            ),
         )
 
-    entitlement_codes = {
+    entitlement_codes = [
         item.code
-        for item in payload.entitlements
-    }
+        for item
+        in payload.entitlements
+    ]
 
-    if "application.deploy" not in entitlement_codes:
+    if (
+        len(entitlement_codes)
+        != len(
+            set(
+                entitlement_codes
+            )
+        )
+    ):
+
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Duplicate entitlement "
+                "codes are not allowed."
+            ),
+        )
+
+    if (
+        "application.deploy"
+        not in entitlement_codes
+    ):
 
         raise HTTPException(
             status_code=422,
@@ -148,179 +608,118 @@ def create_offer(
             ),
         )
 
+    # =====================================================
+    # 6. VERSION POLICY
+    # =====================================================
+
+    try:
+
+        validate_offer_version_policy(
+            db=db,
+
+            offer_application_id=(
+                application.id
+            ),
+
+            version_policy=(
+                payload.version_policy
+            ),
+
+            pinned_version_id=(
+                payload.pinned_version_id
+            ),
+        )
+
+    except VersionPolicyError as error:
+
+        raise HTTPException(
+            status_code=422,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 7. CREATE OFFER
+    # =====================================================
+
     offer = ApplicationOffer(
-        application_id=application.id,
-        offer_key=payload.offer_key,
-        name=payload.name,
-        description=payload.description,
-        delivery_type=payload.delivery_type,
+        application_id=(
+            application.id
+        ),
+
+        offer_key=(
+            payload.offer_key
+        ),
+
+        name=(
+            payload.name
+        ),
+
+        description=(
+            payload.description
+        ),
+
+        delivery_type=(
+            payload.delivery_type
+        ),
+
         status="draft",
+
+        version_policy=(
+            payload.version_policy
+        ),
+
+        pinned_version_id=(
+            payload.pinned_version_id
+        ),
+
+        auto_upgrade=(
+            payload.auto_upgrade
+        ),
     )
 
-    db.add(offer)
+    db.add(
+        offer
+    )
 
     db.flush()
 
-    for item in payload.entitlements:
+    # =====================================================
+    # 8. CREATE ENTITLEMENTS
+    # =====================================================
+
+    for item in (
+        payload.entitlements
+    ):
 
         db.add(
             OfferEntitlement(
                 offer_id=offer.id,
+
                 code=item.code,
-                value_json=item.value,
+
+                value_json=(
+                    item.value
+                ),
+
                 status="active",
             )
         )
 
-    db.commit()
-
-    db.refresh(offer)
-
-    return {
-        "id": str(offer.id),
-        "applicationId": str(
-            offer.application_id
-        ),
-        "offerKey": offer.offer_key,
-        "name": offer.name,
-        "deliveryType": offer.delivery_type,
-        "status": offer.status,
-    }
-
-
-@router.post(
-    "/offers/{offer_id}/activate"
-)
-def activate_offer(
-    offer_id: uuid.UUID,
-
-    db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    ),
-):
-
-    offer = db.get(
-        ApplicationOffer,
-        offer_id,
-    )
-
-    if not offer:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Offer not found",
-        )
-
-    application = db.get(
-        Application,
-        offer.application_id,
-    )
-
-    if not application:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Application not found",
-        )
-
-    try:
-
-        require_publisher_permission(
-            db=db,
-            user=current_user,
-            publisher_id=application.publisher_id,
-            permission_code="offer.manage",
-        )
-
-    except AuthorizationError as error:
-
-        raise HTTPException(
-            status_code=403,
-            detail=str(error),
-        )
-
-    if offer.status == "active":
-
-        return {
-            "status": "ACTIVE",
-            "offerId": str(offer.id),
-        }
-
-    if offer.status != "draft":
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Offer cannot be activated "
-                f"from status {offer.status}"
-            ),
-        )
-
-    offer.status = "active"
-
-    offer.activated_at = datetime.now(
-        timezone.utc
-    )
+    # =====================================================
+    # 9. COMMIT
+    # =====================================================
 
     db.commit()
 
-    return {
-        "status": "ACTIVE",
-        "offerId": str(offer.id),
-    }
-
-
-@router.get(
-    "/applications/{application_id}/offers"
-)
-def list_application_offers(
-    application_id: uuid.UUID,
-
-    db: Session = Depends(get_db),
-
-    current_user: User = Depends(
-        get_current_user
-    ),
-):
-
-    application = db.get(
-        Application,
-        application_id,
+    db.refresh(
+        offer
     )
 
-    if not application:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Application not found",
-        )
-
-    offers = list(
-        db.scalars(
-            select(ApplicationOffer)
-            .where(
-                ApplicationOffer.application_id
-                == application.id
-            )
-            .order_by(
-                ApplicationOffer.created_at.desc()
-            )
-        )
+    return serialize_offer(
+        db,
+        offer,
     )
 
-    return [
-        {
-            "id": str(offer.id),
-            "offerKey": offer.offer_key,
-            "name": offer.name,
-            "deliveryType": offer.delivery_type,
-            "status": offer.status,
-        }
-
-        for offer in offers
-    ]
 
 # =========================================================
 # UPDATE DRAFT OFFER
@@ -331,9 +730,12 @@ def list_application_offers(
 )
 def update_offer(
     offer_id: uuid.UUID,
+
     payload: OfferUpdate,
 
-    db: Session = Depends(get_db),
+    db: Session = Depends(
+        get_db
+    ),
 
     current_user: User = Depends(
         get_current_user
@@ -370,12 +772,13 @@ def update_offer(
         raise HTTPException(
             status_code=409,
             detail=(
-                "Offer references a missing application."
+                "Offer references a "
+                "missing application."
             ),
         )
 
     # =====================================================
-    # 3. PUBLISHER AUTHORIZATION
+    # 3. AUTHORIZATION
     # =====================================================
 
     try:
@@ -383,7 +786,11 @@ def update_offer(
         require_publisher_permission(
             db=db,
             user=current_user,
-            publisher_id=application.publisher_id,
+
+            publisher_id=(
+                application.publisher_id
+            ),
+
             permission_code="offer.manage",
         )
 
@@ -395,43 +802,68 @@ def update_offer(
         ) from error
 
     # =====================================================
-    # 4. ONLY DRAFT OFFERS MAY BE EDITED
+    # 4. DRAFT ONLY
     # =====================================================
 
-    if offer.status != "draft":
+    if (
+        offer.status
+        != "draft"
+    ):
 
         raise HTTPException(
             status_code=409,
             detail=(
-                "Only draft offers can be edited."
+                "Only draft offers "
+                "can be edited."
             ),
         )
 
-    fields_set = payload.model_fields_set
+    
+
+    fields_set = (
+        payload.model_fields_set
+    )
 
     if not fields_set:
 
         raise HTTPException(
             status_code=422,
-            detail="No offer fields were supplied.",
+            detail=(
+                "No offer fields "
+                "were supplied."
+            ),
         )
 
     # =====================================================
     # 5. BASIC FIELDS
     # =====================================================
 
-    if "name" in fields_set:
+    if (
+        "name"
+        in fields_set
+    ):
 
-        if payload.name is None:
+        if (
+            payload.name
+            is None
+        ):
 
             raise HTTPException(
                 status_code=422,
-                detail="Offer name cannot be null.",
+                detail=(
+                    "Offer name "
+                    "cannot be null."
+                ),
             )
 
-        offer.name = payload.name
+        offer.name = (
+            payload.name
+        )
 
-    if "description" in fields_set:
+    if (
+        "description"
+        in fields_set
+    ):
 
         offer.description = (
             payload.description
@@ -449,14 +881,21 @@ def update_offer(
         offer.pinned_version_id
     )
 
-    if "version_policy" in fields_set:
+    if (
+        "version_policy"
+        in fields_set
+    ):
 
-        if payload.version_policy is None:
+        if (
+            payload.version_policy
+            is None
+        ):
 
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "version_policy cannot be null."
+                    "version_policy "
+                    "cannot be null."
                 ),
             )
 
@@ -464,19 +903,22 @@ def update_offer(
             payload.version_policy
         )
 
-        # Switching away from pinned automatically
-        # removes the old pin unless the caller has
-        # explicitly supplied pinned_version_id.
         if (
-            new_version_policy != "pinned"
+            new_version_policy
+            != "pinned"
             and
             "pinned_version_id"
             not in fields_set
         ):
 
-            new_pinned_version_id = None
+            new_pinned_version_id = (
+                None
+            )
 
-    if "pinned_version_id" in fields_set:
+    if (
+        "pinned_version_id"
+        in fields_set
+    ):
 
         new_pinned_version_id = (
             payload.pinned_version_id
@@ -486,9 +928,18 @@ def update_offer(
 
         validate_offer_version_policy(
             db=db,
-            offer_application_id=application.id,
-            version_policy=new_version_policy,
-            pinned_version_id=new_pinned_version_id,
+
+            offer_application_id=(
+                application.id
+            ),
+
+            version_policy=(
+                new_version_policy
+            ),
+
+            pinned_version_id=(
+                new_pinned_version_id
+            ),
         )
 
     except VersionPolicyError as error:
@@ -510,14 +961,21 @@ def update_offer(
     # 7. AUTO UPGRADE
     # =====================================================
 
-    if "auto_upgrade" in fields_set:
+    if (
+        "auto_upgrade"
+        in fields_set
+    ):
 
-        if payload.auto_upgrade is None:
+        if (
+            payload.auto_upgrade
+            is None
+        ):
 
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "auto_upgrade cannot be null."
+                    "auto_upgrade "
+                    "cannot be null."
                 ),
             )
 
@@ -526,39 +984,50 @@ def update_offer(
         )
 
     # =====================================================
-    # 8. ENTITLEMENT TEMPLATE
-    #
-    # Supplied list replaces the COMPLETE template.
-    # Safe because this endpoint only edits drafts.
+    # 8. ENTITLEMENTS
     # =====================================================
 
-    if "entitlements" in fields_set:
+    if (
+        "entitlements"
+        in fields_set
+    ):
 
-        if not payload.entitlements:
-
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "Offer must define at least "
-                    "one entitlement."
-                ),
-            )
-
-        entitlement_codes = [
-            item.code
-            for item in payload.entitlements
-        ]
-
-        if (
-            len(entitlement_codes)
-            != len(set(entitlement_codes))
+        if not (
+            payload.entitlements
         ):
 
             raise HTTPException(
                 status_code=422,
                 detail=(
-                    "Duplicate entitlement codes "
-                    "are not allowed."
+                    "Offer must define "
+                    "at least one entitlement."
+                ),
+            )
+
+        entitlement_codes = [
+            item.code
+
+            for item
+            in payload.entitlements
+        ]
+
+        if (
+            len(
+                entitlement_codes
+            )
+            !=
+            len(
+                set(
+                    entitlement_codes
+                )
+            )
+        ):
+
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Duplicate entitlement "
+                    "codes are not allowed."
                 ),
             )
 
@@ -577,7 +1046,9 @@ def update_offer(
 
         existing_entitlements = list(
             db.scalars(
-                select(OfferEntitlement)
+                select(
+                    OfferEntitlement
+                )
                 .where(
                     OfferEntitlement.offer_id
                     == offer.id
@@ -589,20 +1060,32 @@ def update_offer(
             existing_entitlements
         ):
 
-            db.delete(entitlement)
+            db.delete(
+                entitlement
+            )
 
-        # Important: flush deletes before inserting
-        # replacements because (offer_id, code)
-        # has a unique constraint.
+        # Required because
+        # (offer_id, code) is unique.
         db.flush()
 
-        for item in payload.entitlements:
+        for item in (
+            payload.entitlements
+        ):
 
             db.add(
                 OfferEntitlement(
-                    offer_id=offer.id,
-                    code=item.code,
-                    value_json=item.value,
+                    offer_id=(
+                        offer.id
+                    ),
+
+                    code=(
+                        item.code
+                    ),
+
+                    value_json=(
+                        item.value
+                    ),
+
                     status="active",
                 )
             )
@@ -613,93 +1096,29 @@ def update_offer(
 
     db.commit()
 
-    db.refresh(offer)
-
-    entitlements = list(
-        db.scalars(
-            select(OfferEntitlement)
-            .where(
-                OfferEntitlement.offer_id
-                == offer.id
-            )
-            .order_by(
-                OfferEntitlement.code
-            )
-        )
+    db.refresh(
+        offer
     )
 
-    # =====================================================
-    # 10. RESPONSE
-    # =====================================================
+    return serialize_offer(
+        db,
+        offer,
+    )
 
-    return {
-        "id":
-            str(offer.id),
-
-        "applicationId":
-            str(offer.application_id),
-
-        "offerKey":
-            offer.offer_key,
-
-        "name":
-            offer.name,
-
-        "description":
-            offer.description,
-
-        "deliveryType":
-            offer.delivery_type,
-
-        "status":
-            offer.status,
-
-        "versionPolicy":
-            offer.version_policy,
-
-        "pinnedVersionId": (
-            str(offer.pinned_version_id)
-            if offer.pinned_version_id
-            else None
-        ),
-
-        "autoUpgrade":
-            offer.auto_upgrade,
-
-        "entitlements": [
-            {
-                "id":
-                    str(entitlement.id),
-
-                "code":
-                    entitlement.code,
-
-                "value":
-                    entitlement.value_json,
-
-                "status":
-                    entitlement.status,
-            }
-
-            for entitlement
-            in entitlements
-        ],
-
-        "updatedAt":
-            offer.updated_at,
-    }
 
 # =========================================================
-# RETIRE OFFER
+# ACTIVATE OFFER
 # =========================================================
 
 @router.post(
-    "/offers/{offer_id}/retire"
+    "/offers/{offer_id}/activate"
 )
-def retire_offer(
+def activate_offer(
     offer_id: uuid.UUID,
 
-    db: Session = Depends(get_db),
+    db: Session = Depends(
+        get_db
+    ),
 
     current_user: User = Depends(
         get_current_user
@@ -736,12 +1155,13 @@ def retire_offer(
         raise HTTPException(
             status_code=409,
             detail=(
-                "Offer references a missing application."
+                "Offer references a "
+                "missing application."
             ),
         )
 
     # =====================================================
-    # 3. PUBLISHER AUTHORIZATION
+    # 3. AUTHORIZATION
     # =====================================================
 
     try:
@@ -749,7 +1169,11 @@ def retire_offer(
         require_publisher_permission(
             db=db,
             user=current_user,
-            publisher_id=application.publisher_id,
+
+            publisher_id=(
+                application.publisher_id
+            ),
+
             permission_code="offer.manage",
         )
 
@@ -761,24 +1185,246 @@ def retire_offer(
         ) from error
 
     # =====================================================
-    # 4. IDEMPOTENT RETIREMENT
+    # 4. IDEMPOTENT ACTIVE
     # =====================================================
 
-    if offer.status == "retired":
+    if (
+        offer.status
+        == "active"
+    ):
 
         return {
-            "status": "RETIRED",
-            "offerId": str(offer.id),
+            "status":
+                "ACTIVE",
+
+            "offerId":
+                str(
+                    offer.id
+                ),
         }
 
-    # Only an active commercial offer can be retired.
-    # Draft offers should either be edited or remain draft.
-    if offer.status != "active":
+    if (
+        offer.status
+        != "draft"
+    ):
 
         raise HTTPException(
             status_code=409,
             detail=(
-                f"Offer cannot be retired "
+                "Offer cannot be activated "
+                f"from status {offer.status}"
+            ),
+        )
+
+    # =====================================================
+    # 5. APPLICATION MUST BE PUBLISHED
+    # =====================================================
+
+    if str(
+        application.status or ""
+    ).lower() != "published":
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The application must be published "
+                "before its commercial offer can be activated."
+            ),
+        )
+
+
+    published_version = None
+
+    if offer.version_policy == "pinned":
+
+        if offer.pinned_version_id:
+            candidate = db.get(
+                ApplicationVersion,
+                offer.pinned_version_id
+            )
+
+            if (
+                candidate
+                and
+                candidate.application_id
+                    == application.id
+                and
+                str(
+                    candidate.publication_status or ""
+                ).lower()
+                    == "published"
+            ):
+                published_version = candidate
+
+    else:
+
+        published_version = db.scalar(
+            select(
+                ApplicationVersion
+            )
+            .where(
+                ApplicationVersion.application_id
+                    == application.id,
+
+                ApplicationVersion.publication_status
+                    == "published",
+            )
+            .order_by(
+                ApplicationVersion.created_at.desc()
+            )
+        )
+
+
+    if not published_version:
+
+        detail = (
+            "The pinned application version must be published "
+            "before this offer can be activated."
+            if offer.version_policy == "pinned"
+            else (
+                "The application has no published version. "
+                "Publish a version before activating the offer."
+            )
+        )
+
+        raise HTTPException(
+            status_code=409,
+            detail=detail,
+        )
+
+    # =====================================================
+    # 5. ACTIVATE
+    # =====================================================
+
+    offer.status = (
+        "active"
+    )
+
+    offer.activated_at = (
+        datetime.now(
+            timezone.utc
+        )
+    )
+
+    db.commit()
+
+    return {
+        "status":
+            "ACTIVE",
+
+        "offerId":
+            str(
+                offer.id
+            ),
+    }
+
+
+# =========================================================
+# RETIRE OFFER
+# =========================================================
+
+@router.post(
+    "/offers/{offer_id}/retire"
+)
+def retire_offer(
+    offer_id: uuid.UUID,
+
+    db: Session = Depends(
+        get_db
+    ),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+
+    # =====================================================
+    # 1. OFFER
+    # =====================================================
+
+    offer = db.get(
+        ApplicationOffer,
+        offer_id,
+    )
+
+    if not offer:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Offer not found",
+        )
+
+    # =====================================================
+    # 2. APPLICATION
+    # =====================================================
+
+    application = db.get(
+        Application,
+        offer.application_id,
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Offer references a "
+                "missing application."
+            ),
+        )
+
+    # =====================================================
+    # 3. AUTHORIZATION
+    # =====================================================
+
+    try:
+
+        require_publisher_permission(
+            db=db,
+            user=current_user,
+
+            publisher_id=(
+                application.publisher_id
+            ),
+
+            permission_code="offer.manage",
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 4. IDEMPOTENT RETIRED
+    # =====================================================
+
+    if (
+        offer.status
+        == "retired"
+    ):
+
+        return {
+            "status":
+                "RETIRED",
+
+            "offerId":
+                str(
+                    offer.id
+                ),
+        }
+
+    if (
+        offer.status
+        != "active"
+    ):
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Offer cannot be retired "
                 f"from status {offer.status}"
             ),
         )
@@ -787,24 +1433,29 @@ def retire_offer(
     # 5. RETIRE
     # =====================================================
 
-    offer.status = "retired"
+    offer.status = (
+        "retired"
+    )
 
     db.commit()
 
-    db.refresh(offer)
-
-    # =====================================================
-    # 6. RESPONSE
-    # =====================================================
+    db.refresh(
+        offer
+    )
 
     return {
-        "status": "RETIRED",
+        "status":
+            "RETIRED",
 
         "offerId":
-            str(offer.id),
+            str(
+                offer.id
+            ),
 
         "applicationId":
-            str(offer.application_id),
+            str(
+                offer.application_id
+            ),
 
         "offerKey":
             offer.offer_key,

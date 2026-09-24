@@ -2,7 +2,7 @@ from pathlib import Path
 
 from pydantic_settings import (
     BaseSettings,
-    SettingsConfigDict
+    SettingsConfigDict,
 )
 
 
@@ -24,12 +24,29 @@ class Settings(BaseSettings):
 
     access_token_minutes: int = 60
 
+    # =====================================================
+    # CORS
+    # =====================================================
+
+    cors_origins: str = (
+        "http://localhost:3000,"
+        "http://127.0.0.1:3000"
+    )
+
+    # =====================================================
+    # PYDANTIC SETTINGS
+    # =====================================================
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
-        extra="ignore"
+        extra="ignore",
     )
+
+    # =====================================================
+    # PACKAGE STORAGE
+    # =====================================================
 
     @property
     def package_storage_root(self) -> Path:
@@ -37,6 +54,19 @@ class Settings(BaseSettings):
         return Path(
             self.package_storage_path
         ).resolve()
+
+    # =====================================================
+    # CORS ORIGIN LIST
+    # =====================================================
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+
+        return [
+            item.strip()
+            for item in self.cors_origins.split(",")
+            if item.strip()
+        ]
 
 
 settings = Settings()

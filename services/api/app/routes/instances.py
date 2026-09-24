@@ -2,6 +2,19 @@ from __future__ import annotations
 
 import re
 import uuid
+import hashlib
+import http.client
+import ipaddress
+import secrets
+import socket
+import threading
+import time
+
+from urllib.parse import (
+    quote,
+    urlencode,
+    urlparse,
+)
 
 from datetime import (
     datetime,
@@ -17,7 +30,14 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Request,
 )
+
+from fastapi.responses import (
+    RedirectResponse,
+    Response,
+)
+
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -67,6 +87,7 @@ from services.api.app.services.entitlement_service import (
 
 from services.api.app.services.instance_limit_service import (
     InstanceLimitError,
+    acquire_instance_limit_lock,
     require_instance_capacity,
 )
 
@@ -101,6 +122,1088 @@ def safe_name(
     )
 
     return value.strip("-")
+
+# =========================================================
+# STEP 3C-3A.1 — SECURE RUNTIME GATEWAY
+# =========================================================
+
+_RUNTIME_GATEWAY_SESSION_SECONDS = (
+    8 * 60 * 60
+)
+
+_RUNTIME_GATEWAY_TICKET_SECONDS = 60
+
+_RUNTIME_GATEWAY_SESSIONS: dict[
+    str,
+    dict,
+] = {}
+
+_RUNTIME_GATEWAY_LOCK = (
+    threading.Lock()
+)
+
+
+_RUNTIME_GATEWAY_HOP_HEADERS = {
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+}
+
+
+def _gateway_cookie_name(
+    gateway_id: str,
+) -> str:
+
+    safe = re.sub(
+        r"[^A-Za-z0-9_-]",
+        "",
+        gateway_id,
+    )
+
+    return (
+        "augmis_rt_"
+        + safe[:24]
+    )
+
+
+def _runtime_gateway_cleanup() -> None:
+
+    now = time.time()
+
+    with _RUNTIME_GATEWAY_LOCK:
+
+        expired = [
+            gateway_id
+
+            for gateway_id, session
+            in _RUNTIME_GATEWAY_SESSIONS.items()
+
+            if float(
+                session.get(
+                    "expires_at",
+                    0,
+                )
+            )
+            <= now
+        ]
+
+        for gateway_id in expired:
+
+            _RUNTIME_GATEWAY_SESSIONS.pop(
+                gateway_id,
+                None,
+            )
+
+
+def _hash_gateway_secret(
+    value: str,
+) -> str:
+
+    return hashlib.sha256(
+        value.encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _issue_runtime_gateway_url(
+    *,
+    request: Request,
+    current_user: User,
+    tenant: Tenant,
+    application: Application,
+    instance_id: uuid.UUID,
+) -> str:
+
+    _runtime_gateway_cleanup()
+
+    gateway_id = (
+        secrets.token_urlsafe(
+            24
+        )
+    )
+
+    ticket = (
+        secrets.token_urlsafe(
+            32
+        )
+    )
+
+    now = time.time()
+
+    with _RUNTIME_GATEWAY_LOCK:
+
+        _RUNTIME_GATEWAY_SESSIONS[
+            gateway_id
+        ] = {
+            "user_id":
+                current_user.id,
+
+            "tenant_id":
+                tenant.id,
+
+            "application_id":
+                application.id,
+
+            "instance_id":
+                instance_id,
+
+            # The launch ticket becomes the HttpOnly gateway
+            # cookie after the one-time URL exchange. Only its
+            # SHA-256 hash is retained server-side.
+            "session_hash":
+                _hash_gateway_secret(
+                    ticket
+                ),
+
+            "ticket_used":
+                False,
+
+            "ticket_expires_at":
+                now
+                + _RUNTIME_GATEWAY_TICKET_SECONDS,
+
+            "expires_at":
+                now
+                + _RUNTIME_GATEWAY_SESSION_SECONDS,
+        }
+
+    base_url = str(
+        request.base_url
+    ).rstrip("/")
+
+    return (
+        f"{base_url}"
+        f"/api/v1/runtime-gateway/"
+        f"{gateway_id}/"
+        f"?ticket={quote(ticket)}"
+    )
+
+
+def _validate_private_runtime_url(
+    runtime_url: str,
+):
+
+    parsed = urlparse(
+        runtime_url
+    )
+
+    if parsed.scheme not in {
+        "http",
+        "https",
+    }:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Runtime gateway rejected "
+                "an unsupported internal URL."
+            ),
+        )
+
+    hostname = str(
+        parsed.hostname or ""
+    ).strip()
+
+    if not hostname:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Runtime gateway received "
+                "an invalid internal host."
+            ),
+        )
+
+    if hostname.lower() == "localhost":
+        return parsed
+
+    try:
+        addresses = {
+            item[4][0]
+
+            for item in socket.getaddrinfo(
+                hostname,
+                parsed.port
+                or (
+                    443
+                    if parsed.scheme
+                    == "https"
+                    else 80
+                ),
+            )
+        }
+
+    except socket.gaierror as error:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Runtime gateway could not "
+                "resolve the internal runtime."
+            ),
+        ) from error
+
+    if not addresses:
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Runtime gateway could not "
+                "resolve the internal runtime."
+            ),
+        )
+
+    for address in addresses:
+
+        try:
+            ip = ipaddress.ip_address(
+                address
+            )
+
+        except ValueError:
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Runtime gateway resolved "
+                    "an invalid internal address."
+                ),
+            )
+
+        if not (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+        ):
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Runtime gateway refused "
+                    "to proxy to a public host."
+                ),
+            )
+
+    return parsed
+
+
+def _get_runtime_gateway_context(
+    *,
+    db: Session,
+    gateway_id: str,
+    cookie_secret: str,
+):
+
+    _runtime_gateway_cleanup()
+
+    with _RUNTIME_GATEWAY_LOCK:
+
+        session = (
+            _RUNTIME_GATEWAY_SESSIONS.get(
+                gateway_id
+            )
+        )
+
+        if session:
+            session = dict(
+                session
+            )
+
+    if not session:
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Runtime gateway session "
+                "is invalid or expired."
+            ),
+        )
+
+    if (
+        not cookie_secret
+        or not secrets.compare_digest(
+            _hash_gateway_secret(
+                cookie_secret
+            ),
+            str(
+                session.get(
+                    "session_hash",
+                    "",
+                )
+            ),
+        )
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Runtime gateway session "
+                "cookie is invalid."
+            ),
+        )
+
+    user = db.get(
+        User,
+        session["user_id"],
+    )
+
+    if not user:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Runtime gateway user "
+                "no longer exists."
+            ),
+        )
+
+    tenant = db.get(
+        Tenant,
+        session["tenant_id"],
+    )
+
+    if not tenant:
+        raise HTTPException(
+            status_code=404,
+            detail="Tenant not found",
+        )
+
+    if tenant.status != "active":
+        raise HTTPException(
+            status_code=403,
+            detail="Tenant is not active",
+        )
+
+    application = db.get(
+        Application,
+        session[
+            "application_id"
+        ],
+    )
+
+    if not application:
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    try:
+        require_tenant_permission(
+            db=db,
+            user=user,
+            tenant_id=tenant.id,
+            permission_code=(
+                "application.instance.view"
+            ),
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    try:
+        subscription = (
+            require_active_subscription(
+                db=db,
+                tenant_id=tenant.id,
+                application_id=(
+                    application.id
+                ),
+            )
+        )
+
+        require_active_entitlement(
+            db=db,
+            tenant_id=tenant.id,
+            application_id=(
+                application.id
+            ),
+            entitlement_code=(
+                "application.deploy"
+            ),
+        )
+
+    except EntitlementError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    instance = db.get(
+        ApplicationInstance,
+        session["instance_id"],
+    )
+
+    if not instance:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Application instance "
+                "no longer exists."
+            ),
+        )
+
+    if (
+        instance.tenant_id
+        != tenant.id
+        or instance.application_id
+        != application.id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Runtime gateway tenant "
+                "boundary validation failed."
+            ),
+        )
+
+    if instance.status != "running":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Application instance "
+                "is not running."
+            ),
+        )
+
+    active_version = db.get(
+        ApplicationVersion,
+        instance.active_version_id,
+    )
+
+    if not active_version:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Application instance "
+                "references a missing version."
+            ),
+        )
+
+    try:
+        require_subscription_version_allowed(
+            db=db,
+            subscription=subscription,
+            target_version=active_version,
+        )
+
+    except VersionPolicyError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    deployment = db.scalar(
+        select(
+            ApplicationDeployment
+        )
+        .where(
+            ApplicationDeployment.instance_id
+            == instance.id,
+
+            ApplicationDeployment.status
+            == "running",
+        )
+        .order_by(
+            ApplicationDeployment
+            .created_at
+            .desc()
+        )
+    )
+
+    if (
+        not deployment
+        or not deployment.runtime_url
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Running instance has "
+                "no active runtime."
+            ),
+        )
+
+    parsed_runtime = (
+        _validate_private_runtime_url(
+            deployment.runtime_url
+        )
+    )
+
+    return {
+        "session":
+            session,
+
+        "user":
+            user,
+
+        "tenant":
+            tenant,
+
+        "application":
+            application,
+
+        "subscription":
+            subscription,
+
+        "instance":
+            instance,
+
+        "version":
+            active_version,
+
+        "deployment":
+            deployment,
+
+        "parsed_runtime":
+            parsed_runtime,
+    }
+
+
+def _rewrite_gateway_location(
+    *,
+    location: str,
+    parsed_runtime,
+    gateway_base: str,
+) -> str:
+
+    clean = str(
+        location or ""
+    ).strip()
+
+    if not clean:
+        return clean
+
+    if clean.startswith(
+        "/"
+    ):
+        return (
+            gateway_base
+            + clean.lstrip("/")
+        )
+
+    parsed = urlparse(
+        clean
+    )
+
+    if (
+        parsed.scheme
+        and parsed.hostname
+        and parsed.hostname
+        == parsed_runtime.hostname
+        and parsed.port
+        == parsed_runtime.port
+    ):
+
+        rewritten = (
+            gateway_base
+            + parsed.path.lstrip("/")
+        )
+
+        if parsed.query:
+            rewritten += (
+                "?"
+                + parsed.query
+            )
+
+        return rewritten
+
+    return clean
+
+
+def _rewrite_gateway_html(
+    *,
+    payload: bytes,
+    gateway_base: str,
+) -> bytes:
+
+    try:
+        html = payload.decode(
+            "utf-8"
+        )
+
+    except UnicodeDecodeError:
+        return payload
+
+    if "<base " not in html.lower():
+
+        html = re.sub(
+            r"(?i)<head([^>]*)>",
+            lambda match: (
+                match.group(0)
+                + (
+                    '<base href="'
+                    + gateway_base
+                    + '">'
+                )
+            ),
+            html,
+            count=1,
+        )
+
+    html = re.sub(
+        r'''(?i)\b(href|src|action)=([\"'])/(?!/)''',
+        lambda match: (
+            f"{match.group(1)}="
+            f"{match.group(2)}"
+            f"{gateway_base}"
+        ),
+        html,
+    )
+
+    html = re.sub(
+        r'''(?i)url\(\s*([\"']?)/(?!/)''',
+        lambda match: (
+            "url("
+            + match.group(1)
+            + gateway_base
+        ),
+        html,
+    )
+
+    return html.encode(
+        "utf-8"
+    )
+
+
+async def _proxy_runtime_gateway_request(
+    *,
+    request: Request,
+    gateway_id: str,
+    path: str,
+    db: Session,
+):
+
+    cookie_name = (
+        _gateway_cookie_name(
+            gateway_id
+        )
+    )
+
+    ticket = str(
+        request.query_params.get(
+            "ticket",
+            "",
+        )
+    ).strip()
+
+    if ticket:
+
+        _runtime_gateway_cleanup()
+
+        with _RUNTIME_GATEWAY_LOCK:
+
+            session = (
+                _RUNTIME_GATEWAY_SESSIONS.get(
+                    gateway_id
+                )
+            )
+
+            now = time.time()
+
+            valid_ticket = (
+                bool(session)
+                and not bool(
+                    session.get(
+                        "ticket_used"
+                    )
+                )
+                and float(
+                    session.get(
+                        "ticket_expires_at",
+                        0,
+                    )
+                )
+                > now
+                and secrets.compare_digest(
+                    _hash_gateway_secret(
+                        ticket
+                    ),
+                    str(
+                        session.get(
+                            "session_hash",
+                            "",
+                        )
+                    ),
+                )
+            )
+
+            if valid_ticket:
+                session[
+                    "ticket_used"
+                ] = True
+
+        if not valid_ticket:
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Runtime gateway launch "
+                    "ticket is invalid or expired."
+                ),
+            )
+
+        clean_url = (
+            f"/api/v1/runtime-gateway/"
+            f"{gateway_id}/"
+        )
+
+        response = RedirectResponse(
+            url=clean_url,
+            status_code=303,
+        )
+
+        response.set_cookie(
+            key=cookie_name,
+            value=ticket,
+            max_age=(
+                _RUNTIME_GATEWAY_SESSION_SECONDS
+            ),
+            httponly=True,
+            secure=(
+                request.url.scheme
+                == "https"
+            ),
+            samesite="lax",
+            path=(
+                f"/api/v1/runtime-gateway/"
+                f"{gateway_id}"
+            ),
+        )
+
+        return response
+
+    cookie_secret = str(
+        request.cookies.get(
+            cookie_name,
+            "",
+        )
+    ).strip()
+
+    context = (
+        _get_runtime_gateway_context(
+            db=db,
+            gateway_id=gateway_id,
+            cookie_secret=(
+                cookie_secret
+            ),
+        )
+    )
+
+    parsed_runtime = (
+        context[
+            "parsed_runtime"
+        ]
+    )
+
+    if ".." in [
+        segment
+
+        for segment
+        in str(
+            path or ""
+        ).split("/")
+    ]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid runtime path."
+            ),
+        )
+
+    runtime_base_path = str(
+        parsed_runtime.path
+        or ""
+    ).rstrip("/")
+
+    requested_path = (
+        "/"
+        + str(
+            path or ""
+        ).lstrip("/")
+    )
+
+    upstream_path = (
+        runtime_base_path
+        + requested_path
+    )
+
+    if not upstream_path:
+        upstream_path = "/"
+
+    query_items = [
+        (
+            key,
+            value,
+        )
+
+        for key, value
+        in request.query_params.multi_items()
+
+        if key not in {
+            "ticket",
+        }
+    ]
+
+    if query_items:
+        upstream_path += (
+            "?"
+            + urlencode(
+                query_items,
+                doseq=True,
+            )
+        )
+
+    body = await request.body()
+
+    outgoing_headers = {}
+
+    excluded_request_headers = (
+        _RUNTIME_GATEWAY_HOP_HEADERS
+        | {
+            "host",
+            "cookie",
+            "authorization",
+            "content-length",
+            "accept-encoding",
+        }
+    )
+
+    for key, value in (
+        request.headers.items()
+    ):
+
+        if (
+            key.lower()
+            in excluded_request_headers
+        ):
+            continue
+
+        outgoing_headers[
+            key
+        ] = value
+
+    outgoing_headers[
+        "Accept-Encoding"
+    ] = "identity"
+
+    outgoing_headers[
+        "X-Augmis-Tenant-Id"
+    ] = str(
+        context[
+            "tenant"
+        ].id
+    )
+
+    outgoing_headers[
+        "X-Augmis-Application-Id"
+    ] = str(
+        context[
+            "application"
+        ].id
+    )
+
+    outgoing_headers[
+        "X-Augmis-Instance-Id"
+    ] = str(
+        context[
+            "instance"
+        ].id
+    )
+
+    port = (
+        parsed_runtime.port
+
+        or (
+            443
+
+            if parsed_runtime.scheme
+            == "https"
+
+            else 80
+        )
+    )
+
+    connection_class = (
+        http.client.HTTPSConnection
+
+        if parsed_runtime.scheme
+        == "https"
+
+        else http.client.HTTPConnection
+    )
+
+    connection = connection_class(
+        host=(
+            parsed_runtime.hostname
+        ),
+        port=port,
+        timeout=30,
+    )
+
+    try:
+
+        connection.request(
+            method=(
+                request.method
+            ),
+            url=(
+                upstream_path
+            ),
+            body=(
+                body
+                if body
+                else None
+            ),
+            headers=(
+                outgoing_headers
+            ),
+        )
+
+        upstream = (
+            connection.getresponse()
+        )
+
+        payload = (
+            upstream.read()
+        )
+
+        status_code = (
+            upstream.status
+        )
+
+        upstream_headers = (
+            upstream.getheaders()
+        )
+
+    except (
+        OSError,
+        http.client.HTTPException,
+    ) as error:
+
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Runtime gateway could not "
+                "reach the application."
+            ),
+        ) from error
+
+    finally:
+
+        connection.close()
+
+    gateway_base = (
+        f"/api/v1/runtime-gateway/"
+        f"{gateway_id}/"
+    )
+
+    response_headers = {}
+
+    content_type = ""
+
+    for key, value in (
+        upstream_headers
+    ):
+
+        lower_key = (
+            key.lower()
+        )
+
+        if (
+            lower_key
+            in _RUNTIME_GATEWAY_HOP_HEADERS
+            or lower_key
+            in {
+                "content-length",
+                "set-cookie",
+            }
+        ):
+            continue
+
+        if lower_key == "location":
+
+            value = (
+                _rewrite_gateway_location(
+                    location=value,
+                    parsed_runtime=(
+                        parsed_runtime
+                    ),
+                    gateway_base=(
+                        gateway_base
+                    ),
+                )
+            )
+
+        if lower_key == "content-type":
+            content_type = value
+
+        response_headers[
+            key
+        ] = value
+
+    if (
+        "text/html"
+        in content_type.lower()
+        and payload
+    ):
+
+        payload = (
+            _rewrite_gateway_html(
+                payload=payload,
+                gateway_base=(
+                    gateway_base
+                ),
+            )
+        )
+
+    response_headers[
+        "Cache-Control"
+    ] = "no-store"
+
+    response_headers[
+        "X-Content-Type-Options"
+    ] = "nosniff"
+
+    return Response(
+        content=payload,
+        status_code=status_code,
+        headers=response_headers,
+    )
+
+
+@router.api_route(
+    "/runtime-gateway/{gateway_id}/{path:path}",
+    methods=[
+        "GET",
+        "HEAD",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS",
+    ],
+)
+async def runtime_gateway(
+    gateway_id: str,
+    path: str,
+    request: Request,
+    db: Session = Depends(
+        get_db
+    ),
+):
+
+    return await (
+        _proxy_runtime_gateway_request(
+            request=request,
+            gateway_id=gateway_id,
+            path=path,
+            db=db,
+        )
+    )
+
 
 @router.post(
     "/instances/{instance_id}/upgrade",
@@ -1014,6 +2117,379 @@ def deploy_application(
                 deployment.health_status,
         },
     }
+
+
+
+@router.post(
+    "/tenants/{tenant_id}/applications/{application_id}/open",
+)
+def open_containerized_application(
+    tenant_id: uuid.UUID,
+    application_id: uuid.UUID,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Tenant-safe container application launcher.
+
+    Reuses an existing running tenant/application instance.
+    If none exists, deploys the subscription baseline version.
+
+    Static web applications are intentionally excluded here and
+    will be handled by Step 3C-3B.
+    """
+
+    # =====================================================
+    # 1. TENANT + APPLICATION
+    # =====================================================
+
+    tenant = db.get(
+        Tenant,
+        tenant_id,
+    )
+
+    if not tenant:
+        raise HTTPException(
+            status_code=404,
+            detail="Tenant not found",
+        )
+
+    if tenant.status != "active":
+        raise HTTPException(
+            status_code=409,
+            detail="Tenant is not active",
+        )
+
+    application = db.get(
+        Application,
+        application_id,
+    )
+
+    if not application:
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    # =====================================================
+    # 2. TENANT RBAC
+    #
+    # Viewing/opening an existing runtime requires instance view.
+    # First-time provisioning will still pass through the existing
+    # deploy endpoint, which requires application.deploy.
+    # =====================================================
+
+    try:
+        require_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=tenant.id,
+            permission_code="application.instance.view",
+        )
+
+    except AuthorizationError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 3. COMMERCIAL ACCESS
+    # =====================================================
+
+    try:
+        subscription = require_active_subscription(
+            db=db,
+            tenant_id=tenant.id,
+            application_id=application.id,
+        )
+
+        require_active_entitlement(
+            db=db,
+            tenant_id=tenant.id,
+            application_id=application.id,
+            entitlement_code="application.deploy",
+        )
+
+    except EntitlementError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 4. SERIALIZE OPEN/DEPLOY FOR THIS TENANT + APP
+    #
+    # This prevents two simultaneous Open clicks from creating
+    # two instances when the offer permits multiple instances.
+    # =====================================================
+
+    acquire_instance_limit_lock(
+        db=db,
+        tenant_id=tenant.id,
+        application_id=application.id,
+    )
+
+    # =====================================================
+    # 5. REUSE EXISTING RUNNING INSTANCE
+    # =====================================================
+
+    running_instance = db.scalar(
+        select(ApplicationInstance)
+        .where(
+            ApplicationInstance.tenant_id
+            == tenant.id,
+
+            ApplicationInstance.application_id
+            == application.id,
+
+            ApplicationInstance.status
+            == "running",
+        )
+        .order_by(
+            ApplicationInstance.created_at.desc(),
+        )
+    )
+
+    if running_instance:
+
+        active_version = db.get(
+            ApplicationVersion,
+            running_instance.active_version_id,
+        )
+
+        if not active_version:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Running instance references a missing "
+                    "application version."
+                ),
+            )
+
+        if str(active_version.build_type or "").lower() == "static_web":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Static web applications are handled by "
+                    "Step 3C-3B."
+                ),
+            )
+
+        try:
+            require_subscription_version_allowed(
+                db=db,
+                subscription=subscription,
+                target_version=active_version,
+            )
+
+        except VersionPolicyError as error:
+            raise HTTPException(
+                status_code=403,
+                detail=str(error),
+            ) from error
+
+        deployment = db.scalar(
+            select(ApplicationDeployment)
+            .where(
+                ApplicationDeployment.instance_id
+                == running_instance.id,
+
+                ApplicationDeployment.status
+                == "running",
+            )
+            .order_by(
+                ApplicationDeployment.created_at.desc(),
+            )
+        )
+
+        if (
+            not deployment
+            or not deployment.runtime_url
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Application instance is marked running but "
+                    "has no active runtime URL."
+                ),
+            )
+
+        gateway_url = _issue_runtime_gateway_url(
+            request=request,
+            current_user=current_user,
+            tenant=tenant,
+            application=application,
+            instance_id=running_instance.id,
+        )
+
+        return {
+            "status": "REUSED",
+            "tenantId": str(tenant.id),
+            "applicationId": str(application.id),
+            "instanceId": str(running_instance.id),
+            "versionId": str(active_version.id),
+            "version": active_version.version,
+
+            # IMPORTANT:
+            # Never expose the direct container URL through Open Application.
+            "runtimeUrl": gateway_url,
+        }
+
+
+    # =====================================================
+    # 6. DO NOT CREATE A SECOND INSTANCE WHILE STARTING
+    # =====================================================
+
+    in_progress = db.scalar(
+        select(ApplicationInstance)
+        .where(
+            ApplicationInstance.tenant_id
+            == tenant.id,
+
+            ApplicationInstance.application_id
+            == application.id,
+
+            ApplicationInstance.status.in_(
+                (
+                    "provisioning",
+                    "upgrading",
+                )
+            ),
+        )
+        .order_by(
+            ApplicationInstance.created_at.desc(),
+        )
+    )
+
+    if in_progress:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Application runtime is already being prepared. "
+                "Wait a moment and open it again."
+            ),
+        )
+
+    # =====================================================
+    # 7. RESOLVE SUBSCRIPTION BASELINE VERSION
+    # =====================================================
+
+    if not subscription.baseline_version_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Subscription has no baseline version.",
+        )
+
+    target_version = db.get(
+        ApplicationVersion,
+        subscription.baseline_version_id,
+    )
+
+    if not target_version:
+        raise HTTPException(
+            status_code=409,
+            detail="Subscription baseline version not found.",
+        )
+
+    if target_version.application_id != application.id:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Subscription baseline version belongs to "
+                "another application."
+            ),
+        )
+
+    if str(target_version.build_type or "").lower() == "static_web":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Static web applications are handled by "
+                "Step 3C-3B."
+            ),
+        )
+
+    if target_version.status != "image_ready":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Application baseline version does not have "
+                "a ready container image."
+            ),
+        )
+
+    try:
+        require_subscription_version_allowed(
+            db=db,
+            subscription=subscription,
+            target_version=target_version,
+        )
+
+    except VersionPolicyError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    # =====================================================
+    # 8. DEPLOY THROUGH THE EXISTING, ALREADY-HARDENED
+    #    DEPLOY ENDPOINT LOGIC
+    # =====================================================
+
+    result = deploy_application(
+        tenant_id=tenant.id,
+        version_id=target_version.id,
+        payload=InstanceDeployRequest(
+            name=(
+                f"{application.name} - {tenant.name}"
+            )
+        ),
+        db=db,
+        current_user=current_user,
+    )
+
+    runtime_url = (
+        result.get("deployment", {})
+        .get("url")
+    )
+
+    instance_id = (
+        result.get("instance", {})
+        .get("id")
+    )
+
+    if not runtime_url or not instance_id:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Application deployment completed without a "
+                "runtime URL or instance ID."
+            ),
+        )
+
+    gateway_url = _issue_runtime_gateway_url(
+    request=request,
+    current_user=current_user,
+    tenant=tenant,
+    application=application,
+    instance_id=uuid.UUID(
+        str(instance_id)
+    ),
+)
+
+
+    return {
+        "status": "DEPLOYED",
+        "tenantId": str(tenant.id),
+        "applicationId": str(application.id),
+        "instanceId": str(instance_id),
+        "versionId": str(target_version.id),
+        "version": target_version.version,
+        "runtimeUrl": gateway_url,
+    }
+
 
 
 @router.get(

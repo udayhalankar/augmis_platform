@@ -1,3 +1,4 @@
+# version_policy_service
 import uuid
 
 from packaging.version import (
@@ -35,10 +36,45 @@ def parse_version(
         ) from error
 
 
+def is_version_technically_ready(
+    version: ApplicationVersion,
+) -> bool:
+    """
+    Technical readiness is deliberately separate from publication.
+
+    Containerized applications:
+        image_ready
+
+    Static web applications:
+        validated
+    """
+
+    build_type = str(
+        version.build_type or ""
+    ).lower()
+
+    status = str(
+        version.status or ""
+    ).lower()
+
+    if build_type == "static_web":
+        return status == "validated"
+
+    return status == "image_ready"
+
+
 def get_latest_image_ready_version(
     db: Session,
     application_id: uuid.UUID,
 ) -> ApplicationVersion:
+    """
+    Backward-compatible technical helper used by runtime code.
+
+    This deliberately does NOT inspect publication_status.
+    Existing subscribed tenants may need to continue running a
+    technically valid version even after that version is no longer
+    offered to new customers.
+    """
 
     versions = list(
         db.scalars(
@@ -60,6 +96,52 @@ def get_latest_image_ready_version(
 
     return max(
         versions,
+        key=lambda item: parse_version(
+            item.version
+        ),
+    )
+
+
+def get_latest_published_ready_version(
+    db: Session,
+    application_id: uuid.UUID,
+) -> ApplicationVersion:
+    """
+    Used when creating NEW commercial subscriptions.
+
+    A version must be:
+    1. publication_status == published
+    2. technically ready for its build type
+    """
+
+    versions = list(
+        db.scalars(
+            select(ApplicationVersion)
+            .where(
+                ApplicationVersion.application_id
+                == application_id,
+
+                ApplicationVersion.publication_status
+                == "published",
+            )
+        )
+    )
+
+    ready_versions = [
+        version
+        for version in versions
+        if is_version_technically_ready(
+            version
+        )
+    ]
+
+    if not ready_versions:
+        raise VersionPolicyError(
+            "Application has no published, runtime-ready version."
+        )
+
+    return max(
+        ready_versions,
         key=lambda item: parse_version(
             item.version
         ),
@@ -104,9 +186,11 @@ def validate_offer_version_policy(
                 "Pinned version belongs to another application."
             )
 
-        if version.status != "image_ready":
+        if not is_version_technically_ready(
+            version
+        ):
             raise VersionPolicyError(
-                "Pinned version must be image_ready."
+                "Pinned version is not technically ready."
             )
 
     elif pinned_version_id is not None:
@@ -121,6 +205,12 @@ def resolve_subscription_baseline(
     db: Session,
     offer: ApplicationOffer,
 ) -> ApplicationVersion:
+    """
+    A NEW subscription may only anchor to a PUBLISHED version.
+
+    Existing subscription snapshots remain valid even if a version is
+    retired from future sale later.
+    """
 
     if offer.version_policy == "pinned":
 
@@ -139,9 +229,26 @@ def resolve_subscription_baseline(
                 "Pinned version no longer exists."
             )
 
+        if (
+            str(
+                version.publication_status or ""
+            ).lower()
+            != "published"
+        ):
+            raise VersionPolicyError(
+                "Pinned version is not published."
+            )
+
+        if not is_version_technically_ready(
+            version
+        ):
+            raise VersionPolicyError(
+                "Pinned version is not technically ready."
+            )
+
         return version
 
-    return get_latest_image_ready_version(
+    return get_latest_published_ready_version(
         db=db,
         application_id=offer.application_id,
     )
@@ -152,6 +259,13 @@ def require_subscription_version_allowed(
     subscription: TenantSubscription,
     target_version: ApplicationVersion,
 ):
+    """
+    Checks an existing subscription's contractual version policy.
+
+    Publication status is intentionally NOT required here because
+    an existing customer may continue using a technically valid
+    version after it is retired from new sale.
+    """
 
     offer = db.get(
         ApplicationOffer,
@@ -168,9 +282,11 @@ def require_subscription_version_allowed(
             "Target version belongs to another application."
         )
 
-    if target_version.status != "image_ready":
+    if not is_version_technically_ready(
+        target_version
+    ):
         raise VersionPolicyError(
-            "Target version is not image_ready."
+            "Target version is not technically ready."
         )
 
     policy = subscription.version_policy

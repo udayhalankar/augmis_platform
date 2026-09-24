@@ -1,0 +1,528 @@
+import api from "@/lib/api";
+
+
+export type PublisherWorkspace = {
+  id: string;
+  name: string;
+  slug: string;
+};
+
+
+export type PublisherMembership = {
+  membershipId: string;
+  status: string;
+
+  publisher: PublisherWorkspace;
+};
+
+
+export type PublisherApplication = {
+  id: string;
+  publisherId: string;
+  appKey: string;
+  name: string;
+  description: string | null;
+  status: string;
+};
+
+
+export type ApplicationVersion = {
+  id: string;
+  version: string;
+
+  // Technical/build lifecycle:
+  // validated | build_failed | image_ready
+  status: string;
+
+  // Commercial publication lifecycle:
+  // draft | published | retired
+  publicationStatus: string;
+
+  buildType: string;
+  deploymentMode: string;
+  createdAt: string;
+};
+
+
+export type ApplicationVersionList = {
+  application: {
+    id: string;
+    publisherId: string;
+    appKey: string;
+    name: string;
+    status: string;
+  };
+
+  count: number;
+
+  items: ApplicationVersion[];
+};
+
+
+export type OfferEntitlement = {
+  id?: string;
+  code: string;
+  value: Record<string, unknown> | null;
+  status?: string;
+};
+
+
+export type ApplicationOffer = {
+  id: string;
+
+  applicationId: string;
+
+  offerKey: string;
+
+  name: string;
+
+  description: string | null;
+
+  deliveryType: string;
+
+  status: string;
+
+  versionPolicy: string;
+
+  pinnedVersionId:
+    string | null;
+
+  autoUpgrade: boolean;
+
+  entitlements:
+    OfferEntitlement[];
+};
+
+
+export type OfferSavePayload = {
+  offer_key?: string;
+
+  name: string;
+
+  description:
+    string | null;
+
+  delivery_type?:
+    "hosted_dedicated";
+
+  version_policy:
+    string;
+
+  pinned_version_id:
+    string | null;
+
+  auto_upgrade:
+    boolean;
+
+  entitlements: Array<{
+    code: string;
+
+    value:
+      Record<string, unknown>;
+  }>;
+};
+
+
+export async function createApplicationOffer(
+  applicationId: string,
+  payload: OfferSavePayload
+): Promise<ApplicationOffer> {
+
+  const response =
+    await api.post<ApplicationOffer>(
+      `/api/v1/applications/${applicationId}/offers`,
+      payload
+    );
+
+  return response.data;
+}
+
+
+export async function updateApplicationOffer(
+  offerId: string,
+  payload: Omit<
+    OfferSavePayload,
+    "offer_key" |
+    "delivery_type"
+  >
+): Promise<ApplicationOffer> {
+
+  const response =
+    await api.patch<ApplicationOffer>(
+      `/api/v1/offers/${offerId}`,
+      {
+        name:
+          payload.name,
+
+        description:
+          payload.description,
+
+        version_policy:
+          payload.version_policy,
+
+        pinned_version_id:
+          payload.pinned_version_id,
+
+        auto_upgrade:
+          payload.auto_upgrade,
+
+        entitlements:
+          payload.entitlements,
+      }
+    );
+
+  return response.data;
+}
+
+
+export type ApplicationWorkspace = {
+  versions: ApplicationVersionList;
+  offers: ApplicationOffer[];
+};
+
+
+export async function loadPublishers():
+Promise<PublisherWorkspace[]> {
+
+  const response =
+    await api.get<PublisherMembership[]>(
+      "/api/v1/me/publishers"
+    );
+
+  return response.data
+    .filter(
+      (membership) =>
+        membership.status === "active"
+    )
+    .map(
+      (membership) =>
+        membership.publisher
+    );
+}
+
+
+export async function loadPublisherApplications(
+  publisherId: string
+): Promise<PublisherApplication[]> {
+
+  const response =
+    await api.get<PublisherApplication[]>(
+      "/api/v1/applications"
+    );
+
+  return response.data.filter(
+    (application) =>
+      application.publisherId ===
+      publisherId
+  );
+}
+
+
+export type ApplicationUploadResult = {
+  status: string;
+
+  publisher: {
+    id: string;
+    name: string;
+  };
+
+  application: {
+    id: string;
+    appKey: string;
+    name: string;
+  };
+
+  version: {
+    id: string;
+    version: string;
+    buildType: string;
+    deploymentMode: string;
+  };
+
+  package: {
+    id: string;
+    sha256: string;
+    sizeBytes: number;
+    status: string;
+  };
+};
+
+
+export type StaticApplicationUploadPayload = {
+  appName: string;
+  appKey: string;
+  version: string;
+  description?: string;
+  file: File;
+};
+
+
+export async function loadApplicationWorkspace(
+  applicationId: string
+): Promise<ApplicationWorkspace> {
+
+  const [
+    versionsResponse,
+    offersResponse,
+  ] = await Promise.all([
+
+    api.get<ApplicationVersionList>(
+      `/api/v1/applications/${applicationId}/versions`
+    ),
+
+    api.get<ApplicationOffer[]>(
+      `/api/v1/applications/${applicationId}/offers`
+    ),
+  ]);
+
+
+  return {
+    versions:
+      versionsResponse.data,
+
+    offers:
+      offersResponse.data,
+  };
+}
+
+
+export async function uploadApplicationPackage(
+  publisherId: string,
+  file: File
+): Promise<ApplicationUploadResult> {
+
+  const formData =
+    new FormData();
+
+  formData.append(
+    "file",
+    file
+  );
+
+  const response =
+    await api.post<ApplicationUploadResult>(
+      `/api/v1/publishers/${publisherId}/applications/upload`,
+      formData
+    );
+
+  return response.data;
+}
+
+
+export async function uploadStaticApplication(
+  publisherId: string,
+  payload: StaticApplicationUploadPayload
+): Promise<ApplicationUploadResult> {
+
+  const formData =
+    new FormData();
+
+  formData.append(
+    "file",
+    payload.file
+  );
+
+  formData.append(
+    "app_name",
+    payload.appName.trim()
+  );
+
+  formData.append(
+    "app_key",
+    payload.appKey.trim()
+  );
+
+  formData.append(
+    "version",
+    payload.version.trim()
+  );
+
+  formData.append(
+    "description",
+    (payload.description || "").trim()
+  );
+
+  const response =
+    await api.post<ApplicationUploadResult>(
+      `/api/v1/publishers/${publisherId}/applications/upload-static`,
+      formData
+    );
+
+  return response.data;
+}
+
+
+export type ApplicationVersionDetail = {
+  id: string;
+
+  application: {
+    id: string;
+    publisherId: string;
+    appKey: string;
+    name: string;
+  };
+
+  version: string;
+
+  status: string;
+
+  publicationStatus: string;
+
+  buildType: string;
+
+  deploymentMode: string;
+
+  package: {
+    id: string;
+    status: string;
+    filename: string;
+    sha256: string | null;
+    sizeBytes: number;
+  } | null;
+
+  latestBuild: {
+    id: string;
+    status: string;
+    imageRef: string | null;
+    startedAt: string | null;
+    finishedAt: string | null;
+  } | null;
+
+  createdAt: string;
+};
+
+
+export type ApplicationBuildResult = {
+  status: string;
+
+  build: {
+    id: string;
+    status: string;
+    imageRef: string;
+  };
+
+  application: {
+    id: string;
+    name: string;
+    appKey: string;
+  };
+
+  version: string;
+};
+
+
+export async function loadApplicationVersionDetail(
+  versionId: string
+): Promise<ApplicationVersionDetail> {
+
+  const response =
+    await api.get<ApplicationVersionDetail>(
+      `/api/v1/application-versions/${versionId}`
+    );
+
+  return response.data;
+}
+
+
+export async function loadStaticApplicationContent(
+  versionId: string
+): Promise<string> {
+
+  const response =
+    await api.get<string>(
+      `/api/v1/application-versions/${versionId}/static-content`,
+      {
+        responseType: "text",
+      }
+    );
+
+  return response.data;
+}
+
+
+export async function buildApplicationPackage(
+  packageId: string
+): Promise<ApplicationBuildResult> {
+
+  const response =
+    await api.post<ApplicationBuildResult>(
+      `/api/v1/application-packages/${packageId}/build`
+    );
+
+  return response.data;
+}
+
+
+export type ApplicationVersionLifecycleResult = {
+  status: string;
+  versionId: string;
+  applicationId: string;
+  version: string;
+  buildType?: string;
+
+  technicalStatus?: string;
+  publicationStatus?: string;
+
+  applicationStatus?: string;
+};
+
+
+export async function publishApplicationVersion(
+  versionId: string
+): Promise<ApplicationVersionLifecycleResult> {
+
+  const response =
+    await api.post<ApplicationVersionLifecycleResult>(
+      `/api/v1/application-versions/${versionId}/publish`
+    );
+
+  return response.data;
+}
+
+
+export async function retireApplicationVersion(
+  versionId: string
+): Promise<ApplicationVersionLifecycleResult> {
+
+  const response =
+    await api.post<ApplicationVersionLifecycleResult>(
+      `/api/v1/application-versions/${versionId}/retire`
+    );
+
+  return response.data;
+}
+
+
+export type OfferLifecycleResult = {
+  status: string;
+  offerId: string;
+  applicationId?: string;
+  offerKey?: string;
+  updatedAt?: string;
+};
+
+
+export async function activateApplicationOffer(
+  offerId: string
+): Promise<OfferLifecycleResult> {
+
+  const response =
+    await api.post<OfferLifecycleResult>(
+      `/api/v1/offers/${offerId}/activate`
+    );
+
+  return response.data;
+}
+
+
+export async function retireApplicationOffer(
+  offerId: string
+): Promise<OfferLifecycleResult> {
+
+  const response =
+    await api.post<OfferLifecycleResult>(
+      `/api/v1/offers/${offerId}/retire`
+    );
+
+  return response.data;
+}

@@ -16,6 +16,7 @@ class OfferEntitlementCreate(BaseModel):
     value: dict | None = None
 
 
+
 class OfferCreate(BaseModel):
 
     offer_key: str = Field(
@@ -31,9 +32,25 @@ class OfferCreate(BaseModel):
 
     description: str | None = None
 
-    delivery_type: str = "hosted_dedicated"
+    delivery_type: str = (
+        "hosted_dedicated"
+    )
 
-    entitlements: list[OfferEntitlementCreate]
+    version_policy: str = (
+        "same_major"
+    )
+
+    pinned_version_id: (
+        uuid.UUID | None
+    ) = None
+
+    auto_upgrade: bool = False
+
+    entitlements: list[
+        OfferEntitlementCreate
+    ]
+
+
 
 class OfferUpdate(BaseModel):
 
