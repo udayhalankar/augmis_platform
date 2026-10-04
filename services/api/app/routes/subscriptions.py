@@ -1,3 +1,4 @@
+# services/api/app/routes/subscriptions.py
 import uuid
 
 import hashlib
@@ -24,6 +25,7 @@ from fastapi import (
 )
 
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     RedirectResponse,
 )
@@ -120,6 +122,143 @@ _STATIC_RUNTIME_LOCK = (
     threading.Lock()
 )
 
+# =========================================================
+# STEP 3D-C — TRUSTED STATIC MIME MAP
+# =========================================================
+
+_STATIC_MIME_TYPES = {
+
+    ".html":
+        "text/html; charset=utf-8",
+
+    ".htm":
+        "text/html; charset=utf-8",
+
+    ".css":
+        "text/css; charset=utf-8",
+
+    ".js":
+        "text/javascript; charset=utf-8",
+
+    ".mjs":
+        "text/javascript; charset=utf-8",
+
+    ".json":
+        "application/json",
+
+    ".png":
+        "image/png",
+
+    ".jpg":
+        "image/jpeg",
+
+    ".jpeg":
+        "image/jpeg",
+
+    ".gif":
+        "image/gif",
+
+    ".webp":
+        "image/webp",
+
+    ".svg":
+        "image/svg+xml",
+
+    ".ico":
+        "image/x-icon",
+
+    ".woff":
+        "font/woff",
+
+    ".woff2":
+        "font/woff2",
+
+    ".ttf":
+        "font/ttf",
+
+    ".otf":
+        "font/otf",
+
+    ".txt":
+        "text/plain; charset=utf-8",
+
+    ".xml":
+        "application/xml",
+
+    ".map":
+        "application/json",
+}
+
+
+# =========================================================
+# STEP 3D-D — UNTRUSTED STATIC RUNTIME SECURITY
+# =========================================================
+#
+# Static packages are treated as untrusted browser content.
+#
+# Current security model:
+#   - package content is served read-only
+#   - package code is never executed by Python/the host OS
+#   - fetch/XHR/WebSocket are blocked by CSP
+#   - HTML form submission is blocked
+#   - embedded objects/frames are blocked
+#   - sensitive browser capabilities are disabled
+#
+# Production target:
+# serve untrusted applications from a dedicated runtime origin.
+# =========================================================
+
+_STATIC_RUNTIME_CSP = (
+    # STEP 3D-D3: deny every browser capability by default,
+    # then allow only the static resource types needed by
+    # validated AUGMIS static applications.
+    "default-src 'none'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "media-src 'self' data: blob:; "
+    "manifest-src 'self'; "
+    "worker-src 'none'; "
+    "connect-src 'none'; "
+    "object-src 'none'; "
+    "frame-src 'none'; "
+    "child-src 'none'; "
+    "base-uri 'none'; "
+    "form-action 'none'; "
+    "frame-ancestors 'none'; "
+    # Deliberately omit allow-same-origin. The static app runs
+    # as sandboxed untrusted content even though its public
+    # gateway already has a dedicated browser origin.
+    "sandbox allow-scripts allow-same-origin allow-downloads"
+)
+
+_STATIC_RUNTIME_COMMON_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Origin-Agent-Cluster": "?1",
+    "X-Permitted-Cross-Domain-Policies": "none",
+    "Permissions-Policy": (
+        "camera=(), "
+        "microphone=(), "
+        "geolocation=(), "
+        "payment=(), "
+        "usb=(), "
+        "serial=(), "
+        "bluetooth=(), "
+        "clipboard-read=(), "
+        "clipboard-write=(), "
+        "accelerometer=(), "
+        "gyroscope=(), "
+        "magnetometer=(), "
+        "midi=(), "
+        "display-capture=()"
+    ),
+}
+
 
 def _static_runtime_hash(
     value: str,
@@ -178,6 +317,103 @@ def _cleanup_static_runtime_sessions() -> None:
                 runtime_id,
                 None,
             )
+
+
+# =========================================================
+# STEP 3D-D5 — STATIC RUNTIME SESSION REVOCATION
+# =========================================================
+
+def _revoke_static_runtime_sessions(
+    *,
+    subscription_id: uuid.UUID | None = None,
+    tenant_id: uuid.UUID | None = None,
+    application_id: uuid.UUID | None = None,
+    user_id: uuid.UUID | None = None,
+) -> int:
+    """
+    Permanently invalidate matching in-memory static runtime
+    sessions.
+
+    This is intentionally separate from normal runtime
+    authorization checks.
+
+    Normal authorization answers:
+        "Is this runtime allowed right now?"
+
+    Revocation answers:
+        "Should this existing runtime session ever be usable
+        again?"
+
+    Once removed here, resuming a subscription or restoring a
+    permission does NOT resurrect the old runtime session.
+    A fresh application launch is required.
+    """
+
+    _cleanup_static_runtime_sessions()
+
+    revoked_runtime_ids: list[str] = []
+
+    with _STATIC_RUNTIME_LOCK:
+
+        for (
+            runtime_id,
+            session,
+        ) in list(
+            _STATIC_RUNTIME_SESSIONS.items()
+        ):
+
+            if (
+                subscription_id is not None
+                and session.get(
+                    "subscription_id"
+                )
+                != subscription_id
+            ):
+                continue
+
+            if (
+                tenant_id is not None
+                and session.get(
+                    "tenant_id"
+                )
+                != tenant_id
+            ):
+                continue
+
+            if (
+                application_id is not None
+                and session.get(
+                    "application_id"
+                )
+                != application_id
+            ):
+                continue
+
+            if (
+                user_id is not None
+                and session.get(
+                    "user_id"
+                )
+                != user_id
+            ):
+                continue
+
+            revoked_runtime_ids.append(
+                runtime_id
+            )
+
+        for runtime_id in (
+            revoked_runtime_ids
+        ):
+            _STATIC_RUNTIME_SESSIONS.pop(
+                runtime_id,
+                None,
+            )
+
+    return len(
+        revoked_runtime_ids
+    )
+
 
 
 def _subscription_time_is_active(
@@ -446,6 +682,32 @@ def _resolve_static_subscription_access(
         source_path,
     )
 
+# =========================================================
+# STEP 3D-D5B — RUNTIME HOST SCOPE BINDING
+# =========================================================
+
+def _static_runtime_scope_label(
+    *,
+    tenant_id: uuid.UUID,
+    application_id: uuid.UUID,
+) -> str:
+
+    tenant = (
+        str(tenant_id)
+        .replace("-", "")
+        .lower()
+    )
+
+    application = (
+        str(application_id)
+        .replace("-", "")
+        .lower()
+    )
+
+    return (
+        f"t-{tenant[:8]}"
+        f"-a-{application[:32]}"
+    )
 
 def _issue_static_runtime_url(
     *,
@@ -459,10 +721,16 @@ def _issue_static_runtime_url(
 
     _cleanup_static_runtime_sessions()
 
-    runtime_id = (
-        secrets.token_urlsafe(
-            24
+    scope_label = (
+        _static_runtime_scope_label(
+            tenant_id=tenant.id,
+            application_id=application.id,
         )
+    )
+
+    runtime_id = (
+        f"{secrets.token_hex(16)}"
+        f"_{scope_label}"
     )
 
     ticket = (
@@ -493,10 +761,16 @@ def _issue_static_runtime_url(
             "version_id":
                 version.id,
 
-            "session_hash":
+            "scope_label":
+                scope_label,
+
+            "ticket_hash":
                 _static_runtime_hash(
                     ticket
                 ),
+
+            "session_hash":
+                None,
 
             "ticket_used":
                 False,
@@ -531,6 +805,8 @@ def _validate_static_runtime_session(
 
     _cleanup_static_runtime_sessions()
 
+    session_secret = None
+
     with _STATIC_RUNTIME_LOCK:
 
         session = (
@@ -553,6 +829,34 @@ def _validate_static_runtime_session(
                 "is invalid or expired."
             ),
         )
+
+    print(
+        "[AUGMIS BACKEND RUNTIME COOKIE]",
+        {
+            "runtime_id": runtime_id,
+            "cookie_present": bool(cookie_secret),
+            "cookie_length": len(cookie_secret or ""),
+            "session_exists": bool(session),
+            "expected_hash_present": bool(
+                session.get("session_hash")
+            ) if session else False,
+            "cookie_hash_matches": (
+                bool(cookie_secret)
+                and bool(session)
+                and secrets.compare_digest(
+                    _static_runtime_hash(
+                        cookie_secret
+                    ),
+                    str(
+                        session.get(
+                            "session_hash",
+                            "",
+                        )
+                    ),
+                )
+            ),
+        },
+    )
 
     if (
         not cookie_secret
@@ -623,6 +927,47 @@ def _validate_static_runtime_session(
         raise HTTPException(
             status_code=404,
             detail="Application not found",
+        )
+
+    expected_scope_label = (
+        _static_runtime_scope_label(
+            tenant_id=tenant.id,
+            application_id=application.id,
+        )
+    )
+
+    stored_scope_label = str(
+        session.get(
+            "scope_label",
+            "",
+        )
+    )
+
+    if (
+        stored_scope_label
+        != expected_scope_label
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Static runtime scope "
+                "validation failed."
+            ),
+        )
+
+    expected_runtime_suffix = (
+        f"_{expected_scope_label}"
+    )
+
+    if not runtime_id.endswith(
+        expected_runtime_suffix
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Static runtime tenant/application "
+                "binding failed."
+            ),
         )
 
     try:
@@ -696,6 +1041,236 @@ def _validate_static_runtime_session(
         "source_path":
             source_path,
     }
+
+
+# =========================================================
+# STEP 3D-B — SECURE STATIC ASSET RESOLUTION
+# =========================================================
+
+def _resolve_static_runtime_file(
+    *,
+    source_path: Path,
+    asset_path: str,
+) -> Path:
+
+    # -----------------------------------------------------
+    # LEGACY SINGLE-HTML PACKAGE
+    #
+    # Existing static applications store source_path as
+    # the actual .html file.
+    # -----------------------------------------------------
+
+    if source_path.is_file():
+
+        clean_asset = str(
+            asset_path or ""
+        ).strip("/")
+
+        if clean_asset not in (
+            "",
+            "index.html",
+        ):
+
+            raise HTTPException(
+                status_code=404,
+                detail="Static asset not found.",
+            )
+
+        return source_path
+
+
+    # -----------------------------------------------------
+    # MULTI-FILE STATIC PACKAGE
+    #
+    # New ZIP applications store source_path as the
+    # extracted immutable SHA directory.
+    # -----------------------------------------------------
+
+    if not source_path.is_dir():
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Static application package "
+                "storage is invalid."
+            ),
+        )
+
+
+    clean_asset = str(
+        asset_path or ""
+    ).strip()
+
+
+    # Root request always means index.html.
+
+    if not clean_asset:
+
+        clean_asset = "index.html"
+
+
+    # Browser paths always use '/'.
+    #
+    # Normalize '\' as well so Windows filesystem
+    # semantics cannot bypass the checks below.
+
+    clean_asset = (
+        clean_asset
+        .replace(
+            "\\",
+            "/"
+        )
+        .lstrip("/")
+    )
+
+
+    # -----------------------------------------------------
+    # Reject suspicious paths before filesystem resolution.
+    # -----------------------------------------------------
+
+    parts = [
+        part
+        for part in clean_asset.split("/")
+        if part not in (
+            "",
+            ".",
+        )
+    ]
+
+
+    if (
+        not parts
+        or ".." in parts
+    ):
+
+        raise HTTPException(
+            status_code=404,
+            detail="Static asset not found.",
+        )
+
+
+    # Prevent Windows drive paths such as C:/...
+
+    if ":" in parts[0]:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Static asset not found.",
+        )
+
+
+    package_root = (
+        source_path.resolve()
+    )
+
+
+    candidate = (
+        package_root.joinpath(
+            *parts
+        )
+        .resolve()
+    )
+
+
+    # -----------------------------------------------------
+    # CRITICAL:
+    # The requested file MUST remain inside the immutable
+    # extracted package directory.
+    # -----------------------------------------------------
+
+    try:
+
+        candidate.relative_to(
+            package_root
+        )
+
+    except ValueError as error:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Static asset not found.",
+        ) from error
+
+
+    if not candidate.is_file():
+
+        raise HTTPException(
+            status_code=404,
+            detail="Static asset not found.",
+        )
+
+
+    return candidate
+
+# =========================================================
+# STATIC RUNTIME RESPONSE
+# =========================================================
+
+def _static_runtime_response(
+    file_path: Path,
+):
+    """
+    Serve one validated immutable static runtime asset.
+
+    This function only reads a file that has already been
+    resolved inside the validated package boundary.
+    """
+
+    suffix = file_path.suffix.lower()
+
+    media_type = _STATIC_MIME_TYPES.get(
+        suffix
+    )
+
+    if not media_type:
+        raise HTTPException(
+            status_code=404,
+            detail="Static asset not found.",
+        )
+
+    if suffix in (
+        ".html",
+        ".htm",
+    ):
+        try:
+            html = file_path.read_text(
+                encoding="utf-8"
+            )
+
+        except UnicodeDecodeError as error:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Stored static HTML file "
+                    "is not valid UTF-8."
+                ),
+            ) from error
+
+        return HTMLResponse(
+            content=html,
+            media_type="text/html",
+            headers={
+                **_STATIC_RUNTIME_COMMON_HEADERS,
+                "Cache-Control":
+                    "no-store, max-age=0",
+                "Content-Security-Policy":
+                    _STATIC_RUNTIME_CSP,
+            },
+        )
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        headers={
+            **_STATIC_RUNTIME_COMMON_HEADERS,
+            # Runtime assets remain immutable on disk, but access
+            # is subscription/session-gated. Force revalidation so
+            # subscription revocation is not bypassed by a fresh
+            # browser cache entry.
+            "Cache-Control":
+                "private, no-cache, max-age=0, must-revalidate",
+        },
+    )
 
 
 @router.post(
@@ -869,7 +1444,7 @@ def static_runtime(
                     ),
                     str(
                         session.get(
-                            "session_hash",
+                            "ticket_hash",
                             "",
                         )
                     ),
@@ -878,9 +1453,31 @@ def static_runtime(
 
             if valid_ticket:
 
+                session_secret = (
+                    secrets.token_urlsafe(
+                        32
+                    )
+                )
+
                 session[
                     "ticket_used"
                 ] = True
+
+                session[
+                    "ticket_hash"
+                ] = None
+
+                session[
+                    "ticket_expires_at"
+                ] = 0
+
+                session[
+                    "session_hash"
+                ] = (
+                    _static_runtime_hash(
+                        session_secret
+                    )
+                )
 
         if not valid_ticket:
 
@@ -904,7 +1501,7 @@ def static_runtime(
 
         response.set_cookie(
             key=cookie_name,
-            value=ticket,
+            value=session_secret,
             max_age=(
                 _STATIC_RUNTIME_SESSION_SECONDS
             ),
@@ -914,10 +1511,18 @@ def static_runtime(
                 == "https"
             ),
             samesite="lax",
-            path=(
-                f"/api/v1/static-runtime/"
-                f"{runtime_id}"
-            ),
+
+            # IMPORTANT:
+            # All static runtime requests share this path.
+            #
+            # Runtime isolation is provided by the
+            # runtime-specific cookie NAME, not by relying
+            # on browser path matching.
+            #
+            # This guarantees that index.html, CSS, JS,
+            # images, fonts and nested assets all receive
+            # the runtime session cookie.
+            path="/api/v1/static-runtime/",
         )
 
         return response
@@ -943,49 +1548,98 @@ def static_runtime(
         "source_path"
     ]
 
-    try:
 
-        html = source_path.read_text(
-            encoding="utf-8"
+    runtime_file = (
+        _resolve_static_runtime_file(
+            source_path=
+                source_path,
+
+            asset_path=
+                "",
         )
-
-    except UnicodeDecodeError as error:
-
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Stored static application "
-                "is not valid UTF-8 HTML."
-            ),
-        ) from error
-
-    return HTMLResponse(
-        content=html,
-        headers={
-            "Cache-Control":
-                "no-store",
-
-            "X-Content-Type-Options":
-                "nosniff",
-
-            "Referrer-Policy":
-                "no-referrer",
-
-            "Content-Security-Policy": (
-                "default-src 'self' data: blob:; "
-                "script-src 'self' 'unsafe-inline'; "
-                "style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data: blob:; "
-                "font-src 'self' data:; "
-                "connect-src 'self'; "
-                "object-src 'none'; "
-                "base-uri 'none'; "
-                "form-action 'self'; "
-                "frame-ancestors 'self'"
-            ),
-        },
     )
 
+
+    return _static_runtime_response(
+        runtime_file
+    )
+
+
+# =========================================================
+
+@router.get(
+    "/static-runtime/{runtime_id}/{asset_path:path}"
+)
+def static_runtime_asset(
+    runtime_id: str,
+    asset_path: str,
+    request: Request,
+
+    db: Session = Depends(
+        get_db
+    ),
+):
+
+    # -----------------------------------------------------
+    # Assets NEVER accept launch tickets.
+    #
+    # The browser must first enter through:
+    #
+    # /static-runtime/{runtime_id}/?ticket=...
+    #
+    # That route exchanges the one-time launch ticket for
+    # the HttpOnly runtime cookie.
+    #
+    # CSS/JS/images then arrive here carrying that cookie.
+    # -----------------------------------------------------
+
+    cookie_name = (
+        _static_runtime_cookie_name(
+            runtime_id
+        )
+    )
+
+
+    cookie_secret = str(
+        request.cookies.get(
+            cookie_name,
+            "",
+        )
+    ).strip()
+
+
+    context = (
+        _validate_static_runtime_session(
+            db=db,
+
+            runtime_id=
+                runtime_id,
+
+            cookie_secret=
+                cookie_secret,
+        )
+    )
+
+
+    source_path = context[
+        "source_path"
+    ]
+
+
+    runtime_file = (
+        _resolve_static_runtime_file(
+            source_path=
+                source_path,
+
+            asset_path=
+                asset_path,
+        )
+    )
+
+
+    return _static_runtime_response(
+        runtime_file
+    )
 
 # =========================================================
 # SUBSCRIBE TO OFFER
@@ -2166,17 +2820,41 @@ def suspend_tenant_subscription(
             detail=str(error),
         ) from error
 
+        # =====================================================
+    # STEP 3D-D5
+    #
+    # Suspending a subscription permanently invalidates
+    # every already-issued static runtime session belonging
+    # to that subscription.
+    #
+    # Resuming the subscription later must require a fresh
+    # launch rather than resurrecting an old runtime cookie.
+    # =====================================================
+
+    revoked_runtime_sessions = (
+        _revoke_static_runtime_sessions(
+            subscription_id=
+                subscription.id,
+        )
+    )
+
     return {
-        "status": "SUSPENDED",
-        "subscriptionId": str(
-            subscription.id
-        ),
-        "suspendedAt": (
-            subscription.suspended_at
-        ),
-        "reason": (
-            subscription.suspension_reason
-        ),
+        "status":
+            "SUSPENDED",
+
+        "subscriptionId":
+            str(
+                subscription.id
+            ),
+
+        "suspendedAt":
+            subscription.suspended_at,
+
+        "reason":
+            subscription.suspension_reason,
+
+        "revokedRuntimeSessions":
+            revoked_runtime_sessions,
     }
 
 
@@ -2353,6 +3031,13 @@ def cancel_subscription(
 
     db.commit()
 
+    revoked_runtime_sessions = (
+        _revoke_static_runtime_sessions(
+            subscription_id=
+                subscription.id,
+        )
+    )
+
     return {
         "status": "CANCELLED",
 
@@ -2362,6 +3047,9 @@ def cancel_subscription(
 
         "cancelledAt":
             subscription.cancelled_at,
+
+         "revokedRuntimeSessions":
+            revoked_runtime_sessions,
     }
 
 # =========================================================

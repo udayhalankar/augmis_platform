@@ -31,6 +31,8 @@ import {
   useAuth,
 } from "@/context/auth-context";
 
+import TenantSelector
+  from "@/components/tenant-selector";
 
 const navigation = [
   {
@@ -274,7 +276,7 @@ export default function AppShell({
               "center",
           }}
         >
-
+<TenantSelector />
           <Box
             sx={{
               px: 1.5,
@@ -305,6 +307,11 @@ export default function AppShell({
 
           <IconButton
             aria-label="Settings"
+            onClick={() =>
+              router.push(
+                "/settings/email"
+              )
+            }
           >
             <SettingsOutlined />
           </IconButton>

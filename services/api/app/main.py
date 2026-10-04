@@ -1,6 +1,14 @@
+# services/api/app/main.py
+
 from fastapi import FastAPI
 
-from services.api.app.core.config import settings
+from fastapi.middleware.cors import (
+    CORSMiddleware,
+)
+
+from services.api.app.core.config import (
+    settings,
+)
 
 from services.api.app.routes import (
     applications,
@@ -8,28 +16,34 @@ from services.api.app.routes import (
     auth,
     health,
     instances,
+    invitations,
     memberships,
     offers,
     operations,
+     platform_settings,
     publishers,
     subscriptions,
     tenants,
-)
-
-from fastapi.middleware.cors import (
-    CORSMiddleware,
+    tenant_users,
+    webhooks,
 )
 
 
 app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
-    description="AUGMIS SaaS Platform Control Plane API",
+    description=(
+        "AUGMIS SaaS Platform "
+        "Control Plane API"
+    ),
 )
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list,
+    allow_origins=(
+        settings.cors_origin_list
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -53,11 +67,27 @@ app.include_router(
 )
 
 app.include_router(
+    platform_settings.router
+)
+
+app.include_router(
     publishers.router
 )
 
 app.include_router(
     tenants.router
+)
+
+app.include_router(
+    tenant_users.router
+)
+
+app.include_router(
+    invitations.router
+)
+
+app.include_router(
+    webhooks.router
 )
 
 app.include_router(
@@ -85,8 +115,15 @@ app.include_router(
 def root():
 
     return {
-        "platform": "AUGMIS SaaS Platform",
-        "component": "Control Plane API",
-        "version": "0.1.0",
-        "docs": "/docs",
+        "platform":
+            "AUGMIS SaaS Platform",
+
+        "component":
+            "Control Plane API",
+
+        "version":
+            "0.1.0",
+
+        "docs":
+            "/docs",
     }

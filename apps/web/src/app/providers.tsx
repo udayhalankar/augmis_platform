@@ -13,6 +13,10 @@ import {
   AuthProvider,
 } from "@/context/auth-context";
 
+import {
+  TenantProvider,
+} from "@/context/tenant-context";
+
 import theme from "@/theme";
 
 
@@ -29,7 +33,11 @@ export default function Providers({
       <CssBaseline />
 
       <AuthProvider>
-        {children}
+
+        <TenantProvider>
+          {children}
+        </TenantProvider>
+
       </AuthProvider>
 
     </ThemeProvider>

@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
 
     access_token_minutes: int = 60
+    settings_encryption_key: str = ""
+
+    frontend_base_url: str = (
+        "http://localhost:3000"
+    )
+
+    tenant_invitation_expiry_hours: int = (
+        168
+    )
 
     # =====================================================
     # CORS
@@ -67,6 +76,27 @@ class Settings(BaseSettings):
             for item in self.cors_origins.split(",")
             if item.strip()
         ]
+
+    # =====================================================
+    # EMAIL / INVITATION DELIVERY
+    # =====================================================
+
+    mail_enabled: bool = False
+
+    mail_host: str = ""
+    mail_port: int = 587
+
+    mail_username: str = ""
+    mail_password: str = ""
+
+    mail_from_email: str = "no-reply@augmis.com"
+    mail_from_name: str = "AUGMIS"
+
+    mail_use_starttls: bool = True
+    mail_use_ssl: bool = False
+
+    mail_timeout_seconds: int = 20
+    resend_webhook_secret: str = ""
 
 
 settings = Settings()

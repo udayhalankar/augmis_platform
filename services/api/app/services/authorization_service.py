@@ -11,6 +11,7 @@ from services.api.app.models.iam import (
     PublisherMembershipRole,
     Role,
     RolePermission,
+    PlatformUserRole,
     TenantMembership,
     TenantMembershipRole,
     User,
@@ -110,6 +111,65 @@ def get_publisher_permissions(
         for row in rows
     }
 
+def get_platform_permissions(
+    db: Session,
+    user_id: uuid.UUID,
+) -> set[str]:
+
+    rows = db.execute(
+        select(
+            Permission.code
+        )
+        .join(
+            RolePermission,
+            RolePermission.permission_id
+            == Permission.id,
+        )
+        .join(
+            Role,
+            Role.id
+            == RolePermission.role_id,
+        )
+        .join(
+            PlatformUserRole,
+            PlatformUserRole.role_id
+            == Role.id,
+        )
+        .where(
+            PlatformUserRole.user_id
+            == user_id,
+            Role.scope_type
+            == "platform",
+        )
+    ).all()
+
+    return {
+        row[0]
+        for row in rows
+    }
+
+
+def require_platform_permission(
+    db: Session,
+    user: User,
+    permission_code: str,
+) -> None:
+
+    permissions = (
+        get_platform_permissions(
+            db=db,
+            user_id=user.id,
+        )
+    )
+
+    if (
+        permission_code
+        not in permissions
+    ):
+        raise AuthorizationError(
+            "Missing platform permission: "
+            f"{permission_code}"
+        )
 
 def require_tenant_permission(
     db: Session,

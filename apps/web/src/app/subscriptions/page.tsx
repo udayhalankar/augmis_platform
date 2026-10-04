@@ -1,3 +1,4 @@
+// apps/web/src/app/subscriptions/page.tsx
 "use client";
 
 import {
@@ -7,6 +8,10 @@ import {
 } from "react";
 
 import axios from "axios";
+
+import {
+  useTenant,
+} from "@/context/tenant-context";
 
 import {
   Alert,
@@ -50,8 +55,8 @@ import {
 } from "@/lib/subscriptions";
 
 
-const TENANT_STORAGE_KEY =
-  "augmis.platform.selectedTenantId";
+// const TENANT_STORAGE_KEY =
+//   "augmis.platform.selectedTenantId";
 
 
 function apiError(
@@ -127,10 +132,12 @@ function statusColor(
 
 export default function SubscriptionsPage() {
 
-  const [
-    tenantId,
-    setTenantId,
-  ] = useState("");
+  const {
+  selectedTenant,
+  selectedTenantId,
+  loading: tenantLoading,
+  error: tenantContextError,
+  } = useTenant();
 
 
   const [
@@ -179,143 +186,158 @@ export default function SubscriptionsPage() {
   ] = useState("");
 
 
-  useEffect(
-    () => {
-
-      const params =
-        new URLSearchParams(
-          window.location.search
-        );
-
-      const queryTenantId =
-        params.get(
-          "tenantId"
-        );
-
-      const savedTenantId =
-        window.localStorage.getItem(
-          TENANT_STORAGE_KEY
-        );
-
-      setTenantId(
-        queryTenantId ||
-        savedTenantId ||
-        ""
-      );
-
-    },
-    []
-  );
+  
 
 
-  const loadSubscriptions =
-    useCallback(
-      async (
-        requestedTenantId:
-          string
-      ) => {
+ const loadSubscriptions =
+  useCallback(
+    async (
+      requestedTenantId: string
+    ) => {
 
-        const cleanTenantId =
-          requestedTenantId
-            .trim();
-
-        if (!cleanTenantId) {
-
-          setSubscriptions(
-            []
-          );
-
-          setError(
-            "Enter a tenant ID."
-          );
-
-          return;
-        }
+      const cleanTenantId =
+        requestedTenantId.trim();
 
 
-        setLoading(
-          true
+      if (!cleanTenantId) {
+
+        setSubscriptions(
+          []
         );
 
         setError(
           ""
         );
 
-        try {
+        return;
+      }
 
-          const rows =
-            await loadTenantSubscriptions(
-              cleanTenantId
-            );
 
-          setSubscriptions(
-            rows
-          );
+      setLoading(
+        true
+      );
 
-          window.localStorage.setItem(
-            TENANT_STORAGE_KEY,
+      setError(
+        ""
+      );
+
+
+      try {
+
+        const rows =
+          await loadTenantSubscriptions(
             cleanTenantId
           );
 
-          const url =
-            new URL(
-              window.location.href
-            );
 
-          url.searchParams.set(
-            "tenantId",
-            cleanTenantId
-          );
+        setSubscriptions(
+          rows
+        );
 
-          window.history.replaceState(
-            {},
-            "",
-            url.toString()
-          );
-
-        } catch (
-          loadError
-        ) {
-
-          setSubscriptions(
-            []
-          );
-
-          setError(
-            apiError(
-              loadError,
-              "Subscriptions could not be loaded."
-            )
-          );
-
-        } finally {
-
-          setLoading(
-            false
-          );
-        }
-      },
-      []
-    );
-
-
-  useEffect(
-    () => {
-
-      if (
-        tenantId
+      } catch (
+        loadError
       ) {
-        loadSubscriptions(
-          tenantId
+
+        setSubscriptions(
+          []
+        );
+
+
+        setError(
+          apiError(
+            loadError,
+            "Subscriptions could not be loaded."
+          )
+        );
+
+      } finally {
+
+        setLoading(
+          false
         );
       }
 
     },
-    [
-      tenantId,
-      loadSubscriptions,
-    ]
+    []
   );
+
+
+useEffect(
+  () => {
+
+    const url =
+      new URL(
+        window.location.href
+      );
+
+
+    if (
+      !url.searchParams.has(
+        "tenantId"
+      )
+    ) {
+      return;
+    }
+
+
+    url.searchParams.delete(
+      "tenantId"
+    );
+
+
+    window.history.replaceState(
+      {},
+      "",
+      `${url.pathname}${url.search}${url.hash}`
+    );
+
+  },
+  []
+);
+
+
+ useEffect(
+  () => {
+
+    if (
+      tenantLoading
+    ) {
+      return;
+    }
+
+
+    if (
+      !selectedTenantId
+    ) {
+
+      setSubscriptions(
+        []
+      );
+
+      return;
+    }
+
+
+    setMessage(
+      ""
+    );
+
+    setError(
+      ""
+    );
+
+
+    loadSubscriptions(
+      selectedTenantId
+    );
+
+  },
+  [
+    tenantLoading,
+    selectedTenantId,
+    loadSubscriptions,
+  ]
+);
 
 
   const runAction =
@@ -378,9 +400,14 @@ export default function SubscriptionsPage() {
           );
         }
 
-        await loadSubscriptions(
-          tenantId
-        );
+        if (
+  selectedTenantId
+) {
+
+  await loadSubscriptions(
+    selectedTenantId
+  );
+}
 
       } catch (
         actionError
@@ -444,9 +471,14 @@ export default function SubscriptionsPage() {
           ""
         );
 
-        await loadSubscriptions(
-          tenantId
-        );
+        if (
+  selectedTenantId
+) {
+
+  await loadSubscriptions(
+    selectedTenantId
+  );
+}
 
       } catch (
         suspendError
@@ -523,139 +555,191 @@ export default function SubscriptionsPage() {
 
 
             <Button
-              variant="outlined"
-              startIcon={
-                <RefreshOutlined />
-              }
-              disabled={
-                loading ||
-                !tenantId.trim()
-              }
-              onClick={
-                () =>
-                  loadSubscriptions(
-                    tenantId
-                  )
-              }
-            >
-              Refresh
-            </Button>
-
-          </Box>
-
-
-          <Box
-            sx={{
-              bgcolor:
-                "#ffffff",
-              border:
-                "1px solid",
-              borderColor:
-                "divider",
-              p: 2.5,
-              mb: 2,
-            }}
-          >
-            <Typography
-              sx={{
-                fontSize: 11,
-                fontWeight: 700,
-                color:
-                  "text.secondary",
-                textTransform:
-                  "uppercase",
-                letterSpacing: 0.5,
-                mb: 1,
-              }}
-            >
-              Tenant Scope
-            </Typography>
-
-            <Box
-              sx={{
-                display:
-                  "flex",
-                gap: 1,
-                alignItems:
-                  "center",
-                flexWrap:
-                  "wrap",
-              }}
-            >
-              <TextField
-                size="small"
-                value={
-                  tenantId
+                variant="outlined"
+                startIcon={
+                  <RefreshOutlined />
                 }
-                onChange={
-                  (event) =>
-                    setTenantId(
-                      event.target.value
-                    )
-                }
-                placeholder=
-                  "Tenant UUID"
-                sx={{
-                  minWidth: 380,
-                }}
-              />
-
-              <Button
-                variant="contained"
                 disabled={
                   loading ||
-                  !tenantId.trim()
+                  tenantLoading ||
+                  !selectedTenantId
                 }
                 onClick={
                   () =>
                     loadSubscriptions(
-                      tenantId
+                      selectedTenantId
                     )
                 }
               >
-                Load Subscriptions
+                Refresh
               </Button>
-            </Box>
 
-            <Typography
-              sx={{
-                mt: 1,
-                fontSize: 10.5,
-                color:
-                  "text.secondary",
-              }}
-            >
-              Temporary Step 3B control: use the tenant UUID. We will replace this with a tenant dropdown once the tenant-list API contract is wired.
-            </Typography>
           </Box>
 
+          {tenantContextError ? (
 
-          {message && (
-            <Alert
-              severity="success"
-              onClose={
-                () =>
-                  setMessage("")
-              }
-              sx={{ mb: 2 }}
-            >
-              {message}
-            </Alert>
-          )}
+  <Alert
+    severity="error"
+    sx={{
+      mb: 2,
+    }}
+  >
+    {tenantContextError}
+  </Alert>
+
+) : !tenantLoading &&
+    !selectedTenant ? (
+
+  <Alert
+    severity="warning"
+    sx={{
+      mb: 2,
+    }}
+  >
+    You do not currently have access to an active tenant.
+  </Alert>
+
+) : selectedTenant ? (
+
+  <Box
+    sx={{
+      bgcolor:
+        "#ffffff",
+
+      border:
+        "1px solid",
+
+      borderColor:
+        "divider",
+
+      px: 2.5,
+      py: 1.75,
+
+      mb: 2,
+
+      display:
+        "flex",
+
+      alignItems:
+        "center",
+
+      justifyContent:
+        "space-between",
+
+      gap: 2,
+
+      flexWrap:
+        "wrap",
+    }}
+  >
+
+    <Box>
+
+      <Typography
+        sx={{
+          fontSize: 10,
+          fontWeight: 700,
+
+          color:
+            "text.secondary",
+
+          textTransform:
+            "uppercase",
+
+          letterSpacing:
+            0.6,
+        }}
+      >
+        Current Tenant
+      </Typography>
 
 
-          {error && (
-            <Alert
-              severity="error"
-              onClose={
-                () =>
-                  setError("")
-              }
-              sx={{ mb: 2 }}
-            >
-              {error}
-            </Alert>
-          )}
+      <Typography
+        sx={{
+          mt: 0.35,
+
+          fontSize: 15,
+
+          fontWeight:
+            600,
+        }}
+      >
+        {
+          selectedTenant
+            .tenant
+            .name
+        }
+      </Typography>
+
+
+      <Typography
+        sx={{
+          mt: 0.15,
+
+          fontSize: 10.5,
+
+          color:
+            "text.secondary",
+
+          fontFamily:
+            "monospace",
+        }}
+      >
+        {
+          selectedTenant
+            .tenant
+            .slug
+        }
+      </Typography>
+
+    </Box>
+
+
+    <Chip
+      size="small"
+      label="Active Tenant"
+      color="success"
+      variant="outlined"
+    />
+
+  </Box>
+
+) : null}
+
+{message && (
+
+  <Alert
+    severity="success"
+    onClose={
+      () =>
+        setMessage("")
+    }
+    sx={{
+      mb: 2,
+    }}
+  >
+    {message}
+  </Alert>
+
+)}
+
+
+{error && (
+
+  <Alert
+    severity="error"
+    onClose={
+      () =>
+        setError("")
+    }
+    sx={{
+      mb: 2,
+    }}
+  >
+    {error}
+  </Alert>
+
+)}
 
 
           {loading ? (

@@ -460,25 +460,24 @@ export default function ApplicationUploadDialog({
 
 
       if (
-        mode === "static" &&
-        !(
-          lowerName
-            .endsWith(".html") ||
-          lowerName
-            .endsWith(".htm")
-        )
-      ) {
+          mode === "static" &&
+          !(
+            lowerName.endsWith(".html") ||
+            lowerName.endsWith(".htm") ||
+            lowerName.endsWith(".zip")
+          )
+        ) {
 
-        setFile(
-          null
-        );
+          setFile(
+            null
+          );
 
-        setError(
-          "Static web applications currently require a single .html or .htm file."
-        );
+          setError(
+            "Static web applications require a standalone .html/.htm file or a multi-file .zip package."
+          );
 
-        return;
-      }
+          return;
+        }
 
 
       setFile(
@@ -545,7 +544,7 @@ export default function ApplicationUploadDialog({
 
         setError(
           mode === "static"
-            ? "Select a standalone HTML application first."
+            ? "Select a standalone HTML file or static ZIP package first."
             : "Select an application ZIP package first."
         );
 
@@ -959,27 +958,31 @@ export default function ApplicationUploadDialog({
                 }}
               >
                 {mode === "static"
-                  ? (
-                      <>
-                        Select one standalone
-                        {" "}
-                        <strong>
-                          .html
-                        </strong>
-                        {" "}
-                        or
-                        {" "}
-                        <strong>
-                          .htm
-                        </strong>
-                        {" "}
-                        file. Static web apps
-                        are validated but do
-                        not require a Docker
-                        image build.
-                      </>
-                    )
-                  : (
+                    ? (
+                        <>
+                          Select a standalone
+                          {" "}
+                          <strong>
+                            .html
+                          </strong>
+                          {" / "}
+                          <strong>
+                            .htm
+                          </strong>
+                          {" "}
+                          file or a multi-file
+                          {" "}
+                          <strong>
+                            .zip
+                          </strong>
+                          {" "}
+                          package. Static web
+                          applications are validated
+                          and do not require a Docker
+                          image build.
+                        </>
+                      )
+                    : (
                       <>
                         Select a
                         {" "}
@@ -1006,10 +1009,10 @@ export default function ApplicationUploadDialog({
                 }
                 type="file"
                 accept={
-                  mode === "static"
-                    ? ".html,.htm,text/html"
-                    : ".zip,application/zip"
-                }
+                        mode === "static"
+                          ? ".html,.htm,.zip,text/html,application/zip,application/x-zip-compressed"
+                          : ".zip,application/zip"
+                      }
                 hidden
                 onChange={
                   handleFileChange
@@ -1037,7 +1040,7 @@ export default function ApplicationUploadDialog({
                     }
                   >
                     {mode === "static"
-                      ? "Choose HTML"
+                      ? "Choose HTML / ZIP"
                       : "Choose ZIP"}
                   </Button>
 

@@ -1,3 +1,4 @@
+// apps/web/src/app/tenant-applications/page.tsx
 "use client";
 
 import {
@@ -20,20 +21,16 @@ import {
   Typography,
 } from "@mui/material";
 
-import AppsOutlined
-  from "@mui/icons-material/AppsOutlined";
+import AppsOutlined from "@mui/icons-material/AppsOutlined";
+import RefreshOutlined from "@mui/icons-material/RefreshOutlined";
+import SearchOutlined from "@mui/icons-material/SearchOutlined";
 
-import RefreshOutlined
-  from "@mui/icons-material/RefreshOutlined";
+import AppShell from "@/components/app-shell";
+import ProtectedRoute from "@/components/protected-route";
 
-import SearchOutlined
-  from "@mui/icons-material/SearchOutlined";
-
-import AppShell
-  from "@/components/app-shell";
-
-import ProtectedRoute
-  from "@/components/protected-route";
+import {
+  useTenant,
+} from "@/context/tenant-context";
 
 import {
   loadTenantApplications,
@@ -43,37 +40,25 @@ import {
   TenantAvailableApplication,
 } from "@/lib/tenant-applications";
 
-
-const TENANT_STORAGE_KEY =
-  "augmis.platform.selectedTenantId";
+import {
+  toIsolatedRuntimeGatewayUrl,
+} from "@/lib/runtime-gateway";
 
 
 function apiError(
   error: unknown,
   fallback: string
 ): string {
-
-  if (
-    axios.isAxiosError(
-      error
-    )
-  ) {
-
+  if (axios.isAxiosError(error)) {
     const detail =
-      error.response?.data
-        ?.detail;
+      error.response?.data?.detail;
 
-    if (
-      typeof detail ===
-      "string"
-    ) {
+    if (typeof detail === "string") {
       return detail;
     }
   }
 
-  if (
-    error instanceof Error
-  ) {
+  if (error instanceof Error) {
     return error.message;
   }
 
@@ -84,14 +69,8 @@ function apiError(
 function formatStatus(
   value: string
 ): string {
-
-  return String(
-    value || ""
-  )
-    .replace(
-      /_/g,
-      " "
-    )
+  return String(value || "")
+    .replace(/_/g, " ")
     .replace(
       /\b\w/g,
       (character) =>
@@ -101,12 +80,12 @@ function formatStatus(
 
 
 export default function TenantApplicationsPage() {
-
-  const [
-    tenantId,
-    setTenantId,
-  ] = useState("");
-
+  const {
+    selectedTenant,
+    selectedTenantId,
+    loading: tenantLoading,
+    error: tenantContextError,
+  } = useTenant();
 
   const [
     catalog,
@@ -116,24 +95,20 @@ export default function TenantApplicationsPage() {
       TenantApplicationCatalog | null
     >(null);
 
-
   const [
     loading,
     setLoading,
   ] = useState(false);
-
 
   const [
     error,
     setError,
   ] = useState("");
 
-
   const [
     search,
     setSearch,
   ] = useState("");
-
 
   const [
     openingSubscriptionId,
@@ -141,118 +116,32 @@ export default function TenantApplicationsPage() {
   ] = useState("");
 
 
-  useEffect(
-    () => {
-
-      const params =
-        new URLSearchParams(
-          window.location.search
-        );
-
-      const queryTenantId =
-        params.get(
-          "tenantId"
-        );
-
-      const storedTenantId =
-        window.localStorage.getItem(
-          TENANT_STORAGE_KEY
-        );
-
-
-      const initialTenantId =
-        queryTenantId ||
-        storedTenantId ||
-        "";
-
-
-      setTenantId(
-        initialTenantId
-      );
-
-    },
-    []
-  );
-
-
   const loadCatalog =
     useCallback(
       async (
-        requestedTenantId:
-          string
+        requestedTenantId: string
       ) => {
-
         const cleanTenantId =
           requestedTenantId.trim();
 
-
-        if (
-          !cleanTenantId
-        ) {
-
-          setCatalog(
-            null
-          );
-
-          setError(
-            "Enter a tenant ID."
-          );
-
+        if (!cleanTenantId) {
+          setCatalog(null);
+          setError("");
           return;
         }
 
-
-        setLoading(
-          true
-        );
-
-        setError(
-          ""
-        );
-
+        setLoading(true);
+        setError("");
 
         try {
-
           const result =
             await loadTenantApplications(
               cleanTenantId
             );
 
-
-          setCatalog(
-            result
-          );
-
-
-          window.localStorage.setItem(
-            TENANT_STORAGE_KEY,
-            cleanTenantId
-          );
-
-
-          const url =
-            new URL(
-              window.location.href
-            );
-
-          url.searchParams.set(
-            "tenantId",
-            cleanTenantId
-          );
-
-          window.history.replaceState(
-            {},
-            "",
-            url.toString()
-          );
-
-        } catch (
-          loadError
-        ) {
-
-          setCatalog(
-            null
-          );
+          setCatalog(result);
+        } catch (loadError) {
+          setCatalog(null);
 
           setError(
             apiError(
@@ -260,33 +149,74 @@ export default function TenantApplicationsPage() {
               "Tenant applications could not be loaded."
             )
           );
-
         } finally {
-
-          setLoading(
-            false
-          );
+          setLoading(false);
         }
       },
       []
     );
 
 
+  /*
+   * Remove the legacy Step 3C tenantId query-string parameter.
+   * Tenant selection is now owned by the global TenantProvider.
+   */
   useEffect(
     () => {
+      const url =
+        new URL(
+          window.location.href
+        );
 
       if (
-        tenantId
+        !url.searchParams.has(
+          "tenantId"
+        )
       ) {
-
-        loadCatalog(
-          tenantId
-        );
+        return;
       }
 
+      url.searchParams.delete(
+        "tenantId"
+      );
+
+      window.history.replaceState(
+        {},
+        "",
+        `${url.pathname}${url.search}${url.hash}`
+      );
+    },
+    []
+  );
+
+
+  /*
+   * Automatically reload applications whenever the
+   * global tenant selection changes.
+   */
+  useEffect(
+    () => {
+      if (tenantLoading) {
+        return;
+      }
+
+      if (!selectedTenantId) {
+        setCatalog(null);
+        setSearch("");
+        setError("");
+        return;
+      }
+
+      setSearch("");
+      setError("");
+
+      loadCatalog(
+        selectedTenantId
+      );
     },
     [
-      tenantId,
+      tenantLoading,
+      selectedTenantId,
       loadCatalog,
     ]
   );
@@ -295,25 +225,20 @@ export default function TenantApplicationsPage() {
   const filteredItems =
     useMemo(
       () => {
-
         const items =
           catalog?.items || [];
-
 
         const query =
           search
             .trim()
             .toLowerCase();
 
-
         if (!query) {
           return items;
         }
 
-
         return items.filter(
           (item) => {
-
             const text = [
               item.application.name,
               item.application.appKey,
@@ -325,7 +250,6 @@ export default function TenantApplicationsPage() {
               .filter(Boolean)
               .join(" ")
               .toLowerCase();
-
 
             return text.includes(
               query
@@ -344,90 +268,65 @@ export default function TenantApplicationsPage() {
     async (
       item: TenantAvailableApplication
     ) => {
-
-      if (
-        !item.runtimeReady
-      ) {
-
+      if (!item.runtimeReady) {
         setError(
           "This application version is not runtime-ready."
         );
-
         return;
       }
-
 
       const cleanTenantId =
-        tenantId.trim();
+        selectedTenantId.trim();
 
-
-      if (
-        !cleanTenantId
-      ) {
-
+      if (!cleanTenantId) {
         setError(
-          "Tenant ID is required before opening an application."
+          "Select an active tenant before opening an application."
         );
-
         return;
       }
 
-
-      // Open the browser tab immediately so popup blockers do not
-      // reject the runtime URL after the async API call completes.
+      /*
+       * Open the tab synchronously so browser popup blockers
+       * do not reject the runtime window after the API call.
+       */
       const runtimeWindow =
         window.open(
           "about:blank",
           "_blank"
         );
 
-
-      if (
-        !runtimeWindow
-      ) {
-
+      if (!runtimeWindow) {
         setError(
           "The application window was blocked by the browser. Allow pop-ups for this AUGMIS site and try again."
         );
-
         return;
       }
-
 
       runtimeWindow.opener =
         null;
 
-
       try {
-
         runtimeWindow.document.title =
           `Opening ${item.application.name}`;
 
         runtimeWindow.document.body.innerHTML =
           "<div style='font-family:Arial,sans-serif;padding:32px;color:#334155'>Opening application...</div>";
-
       } catch {
-        // about:blank should normally be writable, but failure here
-        // must not block the tenant-safe launch request.
+        // about:blank should normally be writable.
+        // Failure here must not block the runtime launch.
       }
-
 
       setOpeningSubscriptionId(
         item.subscriptionId
       );
 
-      setError(
-        ""
-      );
-
+      setError("");
 
       try {
-
         const buildType =
           String(
             item.version.buildType || ""
           ).toLowerCase();
-
 
         const result =
           buildType === "static_web"
@@ -440,54 +339,65 @@ export default function TenantApplicationsPage() {
                 item.application.id
               );
 
-
         const runtimeUrl =
           String(
             result.runtimeUrl || ""
           ).trim();
 
-
-        if (
-          !runtimeUrl
-        ) {
+        if (!runtimeUrl) {
           throw new Error(
             "The runtime started but no runtime URL was returned."
           );
         }
 
-
-        let parsedUrl: URL;
-
-        try {
-          parsedUrl =
-            new URL(
-              runtimeUrl
-            );
-        } catch {
-          throw new Error(
-            "The runtime returned an invalid application URL."
-          );
-        }
-
-
+        /*
+         * Static applications must pass through the AUGMIS
+         * isolated Next.js runtime gateway.
+         *
+         * Container applications continue using their
+         * returned runtime URL directly.
+         */
         if (
-          parsedUrl.protocol !== "http:" &&
-          parsedUrl.protocol !== "https:"
+          buildType === "static_web"
         ) {
-          throw new Error(
-            "The runtime returned an unsupported application URL."
+          const gatewayUrl =
+            toIsolatedRuntimeGatewayUrl(
+              runtimeUrl,
+              cleanTenantId,
+              item.application.id
+            );
+
+          runtimeWindow.location.replace(
+            gatewayUrl
+          );
+        } else {
+          let parsedUrl: URL;
+
+          try {
+            parsedUrl =
+              new URL(runtimeUrl);
+          } catch {
+            throw new Error(
+              "The runtime returned an invalid application URL."
+            );
+          }
+
+          if (
+            parsedUrl.protocol !==
+              "http:" &&
+            parsedUrl.protocol !==
+              "https:"
+          ) {
+            throw new Error(
+              "The runtime returned an unsupported application URL."
+            );
+          }
+
+          runtimeWindow.location.replace(
+            parsedUrl.toString()
           );
         }
-
-
-        runtimeWindow.location.replace(
-          parsedUrl.toString()
-        );
-
-      } catch (
-        openError
-      ) {
-
+      } catch (openError) {
         runtimeWindow.close();
 
         setError(
@@ -496,9 +406,7 @@ export default function TenantApplicationsPage() {
             "Application could not be opened."
           )
         );
-
       } finally {
-
         setOpeningSubscriptionId(
           ""
         );
@@ -508,56 +416,38 @@ export default function TenantApplicationsPage() {
 
   return (
     <ProtectedRoute>
-
       <AppShell>
-
         <Box>
 
+          {/* PAGE HEADER */}
           <Box
             sx={{
-              display:
-                "flex",
-
+              display: "flex",
               alignItems:
                 "flex-start",
-
               justifyContent:
                 "space-between",
-
-              gap:
-                2,
-
+              gap: 2,
               flexWrap:
                 "wrap",
-
-              mb:
-                3,
+              mb: 3,
             }}
           >
-
             <Box>
-
               <Typography
                 sx={{
-                  fontSize:
-                    12,
-
+                  fontSize: 12,
                   color:
                     "text.secondary",
-
                   textTransform:
                     "uppercase",
-
                   letterSpacing:
                     0.8,
-
-                  mb:
-                    0.5,
+                  mb: 0.5,
                 }}
               >
                 Tenant Workspace
               </Typography>
-
 
               <Typography
                 variant="h4"
@@ -565,12 +455,9 @@ export default function TenantApplicationsPage() {
                 Tenant Applications
               </Typography>
 
-
               <Typography
                 sx={{
-                  mt:
-                    0.5,
-
+                  mt: 0.5,
                   color:
                     "text.secondary",
                 }}
@@ -579,262 +466,205 @@ export default function TenantApplicationsPage() {
                 through this tenant&apos;s
                 active subscriptions.
               </Typography>
-
             </Box>
-
 
             <Button
               variant="outlined"
-
               startIcon={
                 <RefreshOutlined />
               }
-
               disabled={
                 loading ||
-                !tenantId.trim()
+                tenantLoading ||
+                !selectedTenantId
               }
-
               onClick={
                 () =>
                   loadCatalog(
-                    tenantId
+                    selectedTenantId
                   )
               }
             >
               Refresh
             </Button>
-
           </Box>
 
 
-          <Box
-            sx={{
-              bgcolor:
-                "#ffffff",
-
-              border:
-                "1px solid",
-
-              borderColor:
-                "divider",
-
-              p:
-                2.5,
-
-              mb:
-                2,
-            }}
-          >
-
-            <Typography
+          {/* TENANT CONTEXT */}
+          {tenantContextError ? (
+            <Alert
+              severity="error"
               sx={{
-                fontSize:
-                  11,
-
-                fontWeight:
-                  700,
-
-                color:
-                  "text.secondary",
-
-                textTransform:
-                  "uppercase",
-
-                letterSpacing:
-                  0.5,
-
-                mb:
-                  1,
+                mb: 2,
               }}
             >
-              Tenant Scope
-            </Typography>
-
-
+              {tenantContextError}
+            </Alert>
+          ) : !tenantLoading &&
+            !selectedTenant ? (
+            <Alert
+              severity="warning"
+              sx={{
+                mb: 2,
+              }}
+            >
+              You do not currently have
+              access to an active tenant.
+            </Alert>
+          ) : selectedTenant ? (
             <Box
               sx={{
+                bgcolor:
+                  "#ffffff",
+                border:
+                  "1px solid",
+                borderColor:
+                  "divider",
+                px: 2.5,
+                py: 1.75,
+                mb: 2,
                 display:
                   "flex",
-
-                gap:
-                  1,
-
                 alignItems:
                   "center",
-
+                justifyContent:
+                  "space-between",
+                gap: 2,
                 flexWrap:
                   "wrap",
               }}
             >
+              <Box>
+                <Typography
+                  sx={{
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color:
+                      "text.secondary",
+                    textTransform:
+                      "uppercase",
+                    letterSpacing:
+                      0.6,
+                  }}
+                >
+                  Current Tenant
+                </Typography>
 
-              <TextField
+                <Typography
+                  sx={{
+                    mt: 0.35,
+                    fontSize: 15,
+                    fontWeight: 600,
+                  }}
+                >
+                  {
+                    selectedTenant
+                      .tenant
+                      .name
+                  }
+                </Typography>
+
+                <Typography
+                  sx={{
+                    mt: 0.15,
+                    fontSize:
+                      10.5,
+                    color:
+                      "text.secondary",
+                    fontFamily:
+                      "monospace",
+                  }}
+                >
+                  {
+                    selectedTenant
+                      .tenant
+                      .slug
+                  }
+                </Typography>
+              </Box>
+
+              <Chip
                 size="small"
-
-                value={
-                  tenantId
-                }
-
-                onChange={
-                  (event) =>
-                    setTenantId(
-                      event.target.value
-                    )
-                }
-
-                placeholder=
-                  "Tenant UUID"
-
-                sx={{
-                  minWidth:
-                    390,
-                }}
+                label="Active Tenant"
+                color="success"
+                variant="outlined"
               />
-
-
-              <Button
-                variant="contained"
-
-                disabled={
-                  loading ||
-                  !tenantId.trim()
-                }
-
-                onClick={
-                  () =>
-                    loadCatalog(
-                      tenantId
-                    )
-                }
-              >
-                Load Applications
-              </Button>
-
             </Box>
+          ) : null}
 
 
-            <Typography
-              sx={{
-                mt:
-                  1,
-
-                fontSize:
-                  10.5,
-
-                color:
-                  "text.secondary",
-              }}
-            >
-              Temporary Step 3C tenant
-              input. The API still enforces
-              tenant RBAC; entering another
-              tenant&apos;s UUID does not
-              bypass access control.
-            </Typography>
-
-          </Box>
-
-
+          {/* PAGE ERROR */}
           {error && (
-
             <Alert
               severity="error"
-
               onClose={
                 () =>
                   setError("")
               }
-
               sx={{
-                mb:
-                  2,
+                mb: 2,
               }}
             >
               {error}
             </Alert>
-
           )}
 
 
+          {/* CATALOG HEADER / SEARCH */}
           {catalog && (
-
             <Box
               sx={{
-                mb:
-                  2,
-
+                mb: 2,
                 display:
                   "flex",
-
                 justifyContent:
                   "space-between",
-
                 alignItems:
                   "center",
-
-                gap:
-                  2,
-
+                gap: 2,
                 flexWrap:
                   "wrap",
               }}
             >
-
               <Box>
-
                 <Typography
                   sx={{
-                    fontSize:
-                      15,
-
-                    fontWeight:
-                      600,
+                    fontSize: 15,
+                    fontWeight: 600,
                   }}
                 >
                   {catalog.tenant.name}
                 </Typography>
 
-
                 <Typography
                   sx={{
-                    mt:
-                      0.25,
-
-                    fontSize:
-                      11,
-
+                    mt: 0.25,
+                    fontSize: 11,
                     color:
                       "text.secondary",
                   }}
                 >
-                  {catalog.count}
-                  {" "}
+                  {catalog.count}{" "}
                   available application
                   {catalog.count === 1
                     ? ""
                     : "s"}
                 </Typography>
-
               </Box>
-
 
               <TextField
                 size="small"
-
                 placeholder=
                   "Search tenant applications"
-
                 value={
                   search
                 }
-
                 onChange={
                   (event) =>
                     setSearch(
                       event.target.value
                     )
                 }
-
                 slotProps={{
                   input: {
                     startAdornment: (
@@ -848,37 +678,27 @@ export default function TenantApplicationsPage() {
                     ),
                   },
                 }}
-
                 sx={{
-                  width:
-                    340,
+                  width: 340,
                 }}
               />
-
             </Box>
-
           )}
 
 
+          {/* LOADING */}
           {loading ? (
-
             <Box
               sx={{
-                minHeight:
-                  300,
-
+                minHeight: 300,
                 bgcolor:
                   "#ffffff",
-
                 border:
                   "1px solid",
-
                 borderColor:
                   "divider",
-
                 display:
                   "grid",
-
                 placeItems:
                   "center",
               }}
@@ -889,73 +709,51 @@ export default function TenantApplicationsPage() {
             </Box>
 
           ) : catalog &&
-          filteredItems.length === 0 ? (
+            filteredItems.length ===
+              0 ? (
 
+            /* EMPTY */
             <Box
               sx={{
-                minHeight:
-                  260,
-
+                minHeight: 260,
                 bgcolor:
                   "#ffffff",
-
                 border:
                   "1px solid",
-
                 borderColor:
                   "divider",
-
                 display:
                   "grid",
-
                 placeItems:
                   "center",
-
                 textAlign:
                   "center",
-
-                p:
-                  4,
+                p: 4,
               }}
             >
-
               <Box>
-
                 <AppsOutlined
                   sx={{
-                    fontSize:
-                      40,
-
+                    fontSize: 40,
                     color:
                       "text.secondary",
                   }}
                 />
 
-
                 <Typography
                   sx={{
-                    mt:
-                      1,
-
-                    fontSize:
-                      16,
-
-                    fontWeight:
-                      600,
+                    mt: 1,
+                    fontSize: 16,
+                    fontWeight: 600,
                   }}
                 >
                   No available applications
                 </Typography>
 
-
                 <Typography
                   sx={{
-                    mt:
-                      0.5,
-
-                    fontSize:
-                      12,
-
+                    mt: 0.5,
+                    fontSize: 12,
                     color:
                       "text.secondary",
                   }}
@@ -964,205 +762,162 @@ export default function TenantApplicationsPage() {
                   application subscription
                   matching the current view.
                 </Typography>
-
               </Box>
-
             </Box>
 
           ) : catalog ? (
 
+            /* APPLICATION GRID */
             <Box
               sx={{
                 display:
                   "grid",
-
-                gridTemplateColumns: {
-                  xs:
-                    "1fr",
-
-                  md:
-                    "repeat(2, minmax(0, 1fr))",
-
-                  xl:
-                    "repeat(3, minmax(0, 1fr))",
-                },
-
-                gap:
-                  2,
+                gridTemplateColumns:
+                  {
+                    xs: "1fr",
+                    md:
+                      "repeat(2, minmax(0, 1fr))",
+                    xl:
+                      "repeat(3, minmax(0, 1fr))",
+                  },
+                gap: 2,
               }}
             >
-
               {filteredItems.map(
                 (item) => (
-
                   <Box
                     key={
                       item.subscriptionId
                     }
-
                     sx={{
                       bgcolor:
                         "#ffffff",
-
                       border:
                         "1px solid",
-
                       borderColor:
                         "divider",
-
                       minHeight:
                         270,
-
                       display:
                         "flex",
-
                       flexDirection:
                         "column",
                     }}
                   >
 
+                    {/* CARD HEADER */}
                     <Box
                       sx={{
-                        px:
-                          2.5,
-
-                        py:
-                          2.2,
-
+                        px: 2.5,
+                        py: 2.2,
                         borderBottom:
                           "1px solid",
-
                         borderColor:
                           "divider",
                       }}
                     >
-
                       <Box
                         sx={{
                           display:
                             "flex",
-
                           justifyContent:
                             "space-between",
-
-                          gap:
-                            2,
-
+                          gap: 2,
                           alignItems:
                             "flex-start",
                         }}
                       >
-
                         <Box
                           sx={{
-                            minWidth:
-                              0,
+                            minWidth: 0,
                           }}
                         >
-
                           <Typography
                             sx={{
                               fontSize:
                                 17,
-
                               fontWeight:
                                 600,
                             }}
                           >
-                            {item.application
-                              .name}
+                            {
+                              item
+                                .application
+                                .name
+                            }
                           </Typography>
-
 
                           <Typography
                             sx={{
-                              mt:
-                                0.35,
-
+                              mt: 0.35,
                               fontSize:
                                 11,
-
                               color:
                                 "text.secondary",
-
                               fontFamily:
                                 "monospace",
                             }}
                           >
-                            {item.application
-                              .appKey}
+                            {
+                              item
+                                .application
+                                .appKey
+                            }
                           </Typography>
-
                         </Box>
-
 
                         <Chip
                           size="small"
-
                           label={
                             item.runtimeReady
                               ? "Available"
                               : "Not Ready"
                           }
-
                           color={
                             item.runtimeReady
                               ? "success"
                               : "warning"
                           }
-
                           variant="outlined"
                         />
-
                       </Box>
-
 
                       <Typography
                         sx={{
-                          mt:
-                            1.25,
-
-                          fontSize:
-                            12,
-
+                          mt: 1.25,
+                          fontSize: 12,
                           color:
                             "text.secondary",
-
                           lineHeight:
                             1.55,
                         }}
                       >
-                        {item.application
-                          .description ||
-                          "No application description."}
+                        {
+                          item.application
+                            .description ||
+                          "No application description."
+                        }
                       </Typography>
-
                     </Box>
 
 
+                    {/* CARD META */}
                     <Box
                       sx={{
-                        p:
-                          2.5,
-
+                        p: 2.5,
                         display:
                           "grid",
-
                         gridTemplateColumns:
                           "1fr 1fr",
-
-                        gap:
-                          1.5,
+                        gap: 1.5,
                       }}
                     >
-
                       <Meta
                         label="Version"
                         value={
                           item.version.version
                         }
                       />
-
 
                       <Meta
                         label="Technical"
@@ -1174,7 +929,6 @@ export default function TenantApplicationsPage() {
                         }
                       />
 
-
                       <Meta
                         label="Build Type"
                         value={
@@ -1184,7 +938,6 @@ export default function TenantApplicationsPage() {
                           )
                         }
                       />
-
 
                       <Meta
                         label="Deployment"
@@ -1196,7 +949,6 @@ export default function TenantApplicationsPage() {
                         }
                       />
 
-
                       <Meta
                         label="Subscription"
                         value={
@@ -1207,54 +959,40 @@ export default function TenantApplicationsPage() {
                         }
                       />
 
-
                       <Meta
                         label="Offer"
                         value={
                           item.offer.name
                         }
                       />
-
                     </Box>
 
 
+                    {/* CARD ACTION */}
                     <Box
                       sx={{
-                        mt:
-                          "auto",
-
-                        px:
-                          2.5,
-
-                        py:
-                          1.7,
-
+                        mt: "auto",
+                        px: 2.5,
+                        py: 1.7,
                         borderTop:
                           "1px solid",
-
                         borderColor:
                           "divider",
-
                         display:
                           "flex",
-
                         justifyContent:
                           "flex-end",
                       }}
                     >
-
                       <Button
                         size="small"
-
                         variant="contained"
-
                         disabled={
                           !item.runtimeReady ||
                           Boolean(
                             openingSubscriptionId
                           )
                         }
-
                         onClick={
                           () =>
                             openApplication(
@@ -1262,38 +1000,35 @@ export default function TenantApplicationsPage() {
                             )
                         }
                       >
-                        {openingSubscriptionId ===
-                        item.subscriptionId ? (
-                          <>
-                            <CircularProgress
-                              size={14}
-                              sx={{
-                                mr: 1,
-                                color: "inherit",
-                              }}
-                            />
-                            Opening...
-                          </>
-                        ) : (
-                          "Open Application"
-                        )}
+                        {
+                          openingSubscriptionId ===
+                          item.subscriptionId ? (
+                            <>
+                              <CircularProgress
+                                size={14}
+                                sx={{
+                                  mr: 1,
+                                  color:
+                                    "inherit",
+                                }}
+                              />
+                              Opening...
+                            </>
+                          ) : (
+                            "Open Application"
+                          )
+                        }
                       </Button>
-
                     </Box>
-
                   </Box>
-
                 )
               )}
-
             </Box>
 
           ) : null}
 
         </Box>
-
       </AppShell>
-
     </ProtectedRoute>
   );
 }
@@ -1303,27 +1038,18 @@ function Meta({
   label,
   value,
 }: {
-  label:
-    string;
-
-  value:
-    string;
+  label: string;
+  value: string;
 }) {
-
   return (
     <Box>
-
       <Typography
         sx={{
-          fontSize:
-            9,
-
+          fontSize: 9,
           color:
             "text.secondary",
-
           textTransform:
             "uppercase",
-
           letterSpacing:
             0.45,
         }}
@@ -1331,22 +1057,15 @@ function Meta({
         {label}
       </Typography>
 
-
       <Typography
         sx={{
-          mt:
-            0.25,
-
-          fontSize:
-            11.5,
-
-          fontWeight:
-            600,
+          mt: 0.25,
+          fontSize: 11.5,
+          fontWeight: 600,
         }}
       >
         {value}
       </Typography>
-
     </Box>
   );
 }

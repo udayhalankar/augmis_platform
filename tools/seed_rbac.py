@@ -1,3 +1,4 @@
+# tools/seed_rbac.py
 from sqlalchemy import select
 
 from services.api.app.db.session import SessionLocal
@@ -10,6 +11,10 @@ from services.api.app.models.iam import (
 
 
 PERMISSIONS = {
+
+    "platform.settings.manage":
+        "Manage platform settings",
+
     "tenant.manage":
         "Manage tenant",
 
@@ -49,6 +54,15 @@ PERMISSIONS = {
 
 
 ROLES = {
+
+    ("platform", "platform_owner"): {
+        "name":
+            "Platform Owner",
+
+        "permissions": [
+            "platform.settings.manage",
+        ]
+    },
 
     ("tenant", "tenant_owner"): {
         "name":

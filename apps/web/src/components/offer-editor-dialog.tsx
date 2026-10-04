@@ -198,15 +198,15 @@ export default function OfferEditorDialog({
           )
         );
 
-        console.log(
-          "EDIT OFFER OBJECT:",
-          offer
-        );
+        // console.log(
+        //   "EDIT OFFER OBJECT:",
+        //   offer
+        // );
 
-        console.log(
-          "EDIT ENTITLEMENTS:",
-          offer.entitlements
-        );
+        // console.log(
+        //   "EDIT ENTITLEMENTS:",
+        //   offer.entitlements
+        // );
 
       } else {
 

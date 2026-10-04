@@ -1,3 +1,4 @@
+// apps/web/src/lib/subscriptions.ts
 import api from "@/lib/api";
 
 export type TenantSubscriptionSummary = {

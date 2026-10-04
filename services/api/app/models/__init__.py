@@ -20,9 +20,14 @@ from services.api.app.models.iam import (
     PublisherMembershipRole,
     Role,
     RolePermission,
+    PlatformUserRole,
     TenantMembership,
     TenantMembershipRole,
     User,
+)
+
+from services.api.app.models.platform_settings import (
+    PlatformEmailSettings,
 )
 
 from services.api.app.models.commerce import (
@@ -32,11 +37,17 @@ from services.api.app.models.commerce import (
     TenantSubscription,
 )
 
+from services.api.app.models.email_delivery import (
+    EmailDeliveryEvent,
+)
+
 __all__ = [
     "Publisher",
     "Tenant",
     "Application",
     "ApplicationVersion",
+    "PlatformEmailSettings",
+    "EmailDeliveryEvent",
     "ApplicationPackage",
     "ApplicationValidationRun",
     "ApplicationBuild",
@@ -50,6 +61,7 @@ __all__ = [
     "User",
     "Role",
     "Permission",
+    "PlatformUserRole",
     "RolePermission",
     "TenantMembership",
     "TenantMembershipRole",

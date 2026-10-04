@@ -60,6 +60,14 @@ from tools.validate_package import (
     validate_application_package
 )
 
+from services.api.app.services.static_package_service import (
+    StaticPackageValidationError,
+    calculate_sha256,
+    extract_static_zip,
+    inspect_static_zip,
+    validate_single_static_html,
+)
+
 
 router = APIRouter(
     prefix="/api/v1",
@@ -505,249 +513,742 @@ def upload_static_application(
         get_current_user
     ),
 ):
+
+    # =====================================================
+    # STEP 3D-A
+    # STATIC HTML + MULTI-FILE STATIC ZIP UPLOAD
+    # =====================================================
+
     publisher = db.get(
         Publisher,
         publisher_id
     )
 
     if not publisher:
+
         raise HTTPException(
             status_code=404,
             detail="Publisher not found"
         )
 
+
+    # =====================================================
+    # AUTHORIZATION
+    # =====================================================
+
     try:
+
         require_publisher_permission(
             db=db,
             user=current_user,
             publisher_id=publisher.id,
             permission_code="application.upload"
         )
+
     except AuthorizationError as error:
+
         raise HTTPException(
             status_code=403,
             detail=str(error)
         ) from error
 
-    clean_name = str(app_name or "").strip()
-    clean_key = str(app_key or "").strip().lower()
-    clean_version = str(version or "").strip()
-    clean_description = str(description or "").strip()
+
+    # =====================================================
+    # NORMALIZE METADATA
+    # =====================================================
+
+    clean_name = str(
+        app_name or ""
+    ).strip()
+
+    clean_key = str(
+        app_key or ""
+    ).strip().lower()
+
+    clean_version = str(
+        version or ""
+    ).strip()
+
+    clean_description = str(
+        description or ""
+    ).strip()
+
 
     if not clean_name:
+
         raise HTTPException(
             status_code=400,
             detail="Application name is required"
         )
 
-    if not STATIC_APP_KEY.fullmatch(clean_key):
+
+    if not STATIC_APP_KEY.fullmatch(
+        clean_key
+    ):
+
         raise HTTPException(
             status_code=400,
             detail=(
-                "App key must contain only lowercase letters, numbers "
-                "and hyphens, and must start/end with a letter or number"
+                "App key must contain only lowercase "
+                "letters, numbers and hyphens, and must "
+                "start/end with a letter or number"
             )
         )
 
-    if not STATIC_VERSION.fullmatch(clean_version):
+
+    if not STATIC_VERSION.fullmatch(
+        clean_version
+    ):
+
         raise HTTPException(
             status_code=400,
-            detail="Version must use semantic version format, for example 1.0.0"
+            detail=(
+                "Version must use semantic version "
+                "format, for example 1.0.0"
+            )
         )
 
+
     if not file.filename:
+
         raise HTTPException(
             status_code=400,
             detail="Filename is required"
         )
 
-    lower_filename = file.filename.lower()
+
+    lower_filename = (
+        file.filename.lower()
+    )
+
+
+    is_html = (
+        lower_filename.endswith(
+            ".html"
+        )
+        or lower_filename.endswith(
+            ".htm"
+        )
+    )
+
+    is_zip = (
+        lower_filename.endswith(
+            ".zip"
+        )
+    )
+
 
     if not (
-        lower_filename.endswith(".html")
-        or lower_filename.endswith(".htm")
+        is_html
+        or is_zip
     ):
+
         raise HTTPException(
             status_code=400,
-            detail="Static web upload currently accepts only .html or .htm files"
+            detail=(
+                "Static web upload accepts "
+                ".html, .htm or .zip files"
+            )
         )
+
+
+    # =====================================================
+    # IMMUTABLE VERSION CHECK
+    # =====================================================
 
     existing_application = db.scalar(
         select(Application)
         .where(
-            Application.publisher_id == publisher.id,
-            Application.app_key == clean_key,
+            Application.publisher_id
+            == publisher.id,
+
+            Application.app_key
+            == clean_key,
         )
     )
 
+
     if existing_application:
+
         existing_version = db.scalar(
             select(ApplicationVersion)
             .where(
-                ApplicationVersion.application_id == existing_application.id,
-                ApplicationVersion.version == clean_version,
+                ApplicationVersion.application_id
+                == existing_application.id,
+
+                ApplicationVersion.version
+                == clean_version,
             )
         )
 
+
         if existing_version:
+
             raise HTTPException(
                 status_code=409,
-                detail="This application version already exists"
+                detail=(
+                    "This application version "
+                    "already exists"
+                )
             )
+
+
+    # =====================================================
+    # QUARANTINE
+    # =====================================================
 
     package_id = uuid.uuid4()
 
-    quarantine_path = (
+
+    quarantine_root = (
         settings.package_storage_root
         / "quarantine"
-        / f"{package_id}.html"
     )
+
+
+    quarantine_root.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+
+    quarantine_suffix = (
+        ".zip"
+        if is_zip
+        else ".html"
+    )
+
+
+    quarantine_path = (
+        quarantine_root
+        / f"{package_id}{quarantine_suffix}"
+    )
+
 
     size_bytes = save_upload(
         file,
         quarantine_path
     )
 
+
+    # =====================================================
+    # VALIDATE PACKAGE
+    # =====================================================
+
+    package_format = (
+        "zip"
+        if is_zip
+        else "single_html"
+    )
+
+
+    extraction_info = None
+
+
     try:
-        _, sha256 = validate_static_html_file(
-            quarantine_path
-        )
-    except HTTPException:
+
+        if is_zip:
+
+            sha256 = calculate_sha256(
+                quarantine_path
+            )
+
+            # Inspect before any final extraction.
+            #
+            # extract_static_zip() performs validation again
+            # immediately before extraction.
+          
+            extraction_info = (
+                inspect_static_zip(
+                    quarantine_path
+                )
+            )
+
+        else:
+
+            html_info = (
+                validate_single_static_html(
+                    quarantine_path
+                )
+            )
+
+            sha256 = html_info[
+                "sha256"
+            ]
+
+            extraction_info = {
+                "entryFile":
+                    html_info[
+                        "entryFile"
+                    ],
+
+                "fileCount":
+                    html_info[
+                        "fileCount"
+                    ],
+
+                "extractedSizeBytes":
+                    html_info[
+                        "extractedSizeBytes"
+                    ],
+            }
+
+
+    except StaticPackageValidationError as error:
+
         rejected_root = (
             settings.package_storage_root
             / "rejected"
         )
 
+
         rejected_root.mkdir(
             parents=True,
-            exist_ok=True
+            exist_ok=True,
         )
+
 
         rejected_path = (
             rejected_root
-            / f"{package_id}.html"
+            / (
+                f"{package_id}"
+                f"{quarantine_suffix}"
+            )
         )
 
-        shutil.move(
-            str(quarantine_path),
-            str(rejected_path)
-        )
 
-        raise
+        if quarantine_path.exists():
 
-    application = existing_application
+            shutil.move(
+                str(quarantine_path),
+                str(rejected_path)
+            )
+
+
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message":
+                    "Static application package "
+                    "validation failed",
+
+                "errors": [
+                    str(error)
+                ],
+            },
+        ) from error
+
+
+    # =====================================================
+    # APPLICATION
+    # =====================================================
+
+    application = (
+        existing_application
+    )
+
 
     if not application:
+
         application = Application(
-            publisher_id=publisher.id,
-            app_key=clean_key,
-            name=clean_name,
-            description=clean_description or None,
-            status="validated",
+            publisher_id=
+                publisher.id,
+
+            app_key=
+                clean_key,
+
+            name=
+                clean_name,
+
+            description=
+                clean_description
+                or None,
+
+            status=
+                "validated",
         )
 
-        db.add(application)
-        db.flush()
-    else:
-        application.name = clean_name
-        application.description = (
-            clean_description or None
+
+        db.add(
+            application
         )
+
+        db.flush()
+
+
+    else:
+
+        application.name = (
+            clean_name
+        )
+
+        application.description = (
+            clean_description
+            or None
+        )
+
+
+    # =====================================================
+    # MANIFEST
+    # =====================================================
 
     manifest = {
         "metadata": {
-            "id": clean_key,
-            "name": clean_name,
-            "description": clean_description,
-            "version": clean_version,
+            "id":
+                clean_key,
+
+            "name":
+                clean_name,
+
+            "description":
+                clean_description,
+
+            "version":
+                clean_version,
         },
+
         "runtime": {
-            "buildType": "static_web",
-            "deploymentMode": "static",
-            "entryFile": "index.html",
+            "buildType":
+                "static_web",
+
+            "deploymentMode":
+                "static",
+
+            "entryFile":
+                "index.html",
+
+            "packageFormat":
+                package_format,
+        },
+
+        "package": {
+            "sha256":
+                sha256,
+
+            "fileCount":
+                extraction_info[
+                    "fileCount"
+                ],
+
+            "extractedSizeBytes":
+                extraction_info[
+                    "extractedSizeBytes"
+                ],
         },
     }
 
+
+    # =====================================================
+    # VERSION
+    # =====================================================
+
     version_row = ApplicationVersion(
-        application_id=application.id,
-        version=clean_version,
-        deployment_mode="static",
-        build_type="static_web",
-        manifest=manifest,
-        status="validated",
-        publication_status="draft",
+        application_id=
+            application.id,
+
+        version=
+            clean_version,
+
+        deployment_mode=
+            "static",
+
+        build_type=
+            "static_web",
+
+        manifest=
+            manifest,
+
+        status=
+            "validated",
+
+        publication_status=
+            "draft",
     )
 
-    db.add(version_row)
+
+    db.add(
+        version_row
+    )
+
     db.flush()
 
-    validated_path = (
+
+    # =====================================================
+    # FINAL IMMUTABLE STORAGE
+    # =====================================================
+
+    version_root = (
         settings.package_storage_root
         / "validated"
         / publisher.slug
         / clean_key
         / clean_version
-        / f"{sha256}.html"
     )
 
-    validated_path.parent.mkdir(
+
+    version_root.mkdir(
         parents=True,
-        exist_ok=True
+        exist_ok=True,
     )
 
-    shutil.move(
-        str(quarantine_path),
-        str(validated_path)
-    )
+
+    try:
+
+        if is_zip:
+
+            validated_path = (
+                version_root
+                / sha256
+            )
+
+
+            extraction_info = (
+                extract_static_zip(
+                    quarantine_path,
+                    validated_path,
+                )
+            )
+
+
+            # The validated package is now represented by
+            # the immutable extracted directory.
+            #
+            # The original ZIP is retained beside it for
+            # traceability / future download or scanning.
+
+            original_zip_path = (
+                version_root
+                / f"{sha256}.zip"
+            )
+
+
+            shutil.move(
+                str(quarantine_path),
+                str(original_zip_path)
+            )
+
+
+        else:
+
+            validated_path = (
+                version_root
+                / f"{sha256}.html"
+            )
+
+
+            shutil.move(
+                str(quarantine_path),
+                str(validated_path)
+            )
+
+
+    except StaticPackageValidationError as error:
+
+        # Remove partially-created version data.
+        if is_zip:
+
+            partial_directory = (
+                version_root
+                / sha256
+            )
+
+            shutil.rmtree(
+                partial_directory,
+                ignore_errors=True,
+            )
+
+
+        if quarantine_path.exists():
+
+            rejected_root = (
+                settings.package_storage_root
+                / "rejected"
+            )
+
+
+            rejected_root.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
+
+            rejected_path = (
+                rejected_root
+                / (
+                    f"{package_id}"
+                    f"{quarantine_suffix}"
+                )
+            )
+
+
+            shutil.move(
+                str(quarantine_path),
+                str(rejected_path)
+            )
+
+
+        db.rollback()
+
+
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message":
+                    "Static application package "
+                    "extraction failed",
+
+                "errors": [
+                    str(error)
+                ],
+            },
+        ) from error
+
+
+    # =====================================================
+    # PACKAGE RECORD
+    # =====================================================
 
     package = ApplicationPackage(
-        id=package_id,
-        publisher_id=publisher.id,
-        application_version_id=version_row.id,
-        original_filename=file.filename,
-        stored_path=str(validated_path),
-        size_bytes=size_bytes,
-        sha256=sha256,
-        status="validated",
+        id=
+            package_id,
+
+        publisher_id=
+            publisher.id,
+
+        application_version_id=
+            version_row.id,
+
+        original_filename=
+            file.filename,
+
+        stored_path=
+            str(
+                validated_path
+            ),
+
+        size_bytes=
+            size_bytes,
+
+        sha256=
+            sha256,
+
+        status=
+            "validated",
     )
 
-    db.add(package)
+
+    db.add(
+        package
+    )
+
     db.flush()
 
-    validation_run = ApplicationValidationRun(
-        package_id=package.id,
-        status="valid",
-        errors=[],
+
+    # =====================================================
+    # VALIDATION RUN
+    # =====================================================
+
+    validation_run = (
+        ApplicationValidationRun(
+            package_id=
+                package.id,
+
+            status=
+                "valid",
+
+            errors=
+                [],
+        )
     )
 
-    db.add(validation_run)
+
+    db.add(
+        validation_run
+    )
+
+
     db.commit()
 
+
+    # =====================================================
+    # RESPONSE
+    # =====================================================
+
     return {
-        "status": "VALIDATED",
+        "status":
+            "VALIDATED",
+
         "publisher": {
-            "id": str(publisher.id),
-            "name": publisher.name,
+            "id":
+                str(
+                    publisher.id
+                ),
+
+            "name":
+                publisher.name,
         },
+
         "application": {
-            "id": str(application.id),
-            "appKey": application.app_key,
-            "name": application.name,
+            "id":
+                str(
+                    application.id
+                ),
+
+            "appKey":
+                application.app_key,
+
+            "name":
+                application.name,
         },
+
         "version": {
-            "id": str(version_row.id),
-            "version": version_row.version,
-            "buildType": version_row.build_type,
-            "deploymentMode": version_row.deployment_mode,
+            "id":
+                str(
+                    version_row.id
+                ),
+
+            "version":
+                version_row.version,
+
+            "buildType":
+                version_row.build_type,
+
+            "deploymentMode":
+                version_row.deployment_mode,
         },
+
         "package": {
-            "id": str(package.id),
-            "sha256": package.sha256,
-            "sizeBytes": package.size_bytes,
-            "status": package.status,
+            "id":
+                str(
+                    package.id
+                ),
+
+            "sha256":
+                package.sha256,
+
+            "sizeBytes":
+                package.size_bytes,
+
+            "status":
+                package.status,
+
+            "format":
+                package_format,
+
+            "entryFile":
+                "index.html",
+
+            "fileCount":
+                extraction_info[
+                    "fileCount"
+                ],
+
+            "extractedSizeBytes":
+                extraction_info[
+                    "extractedSizeBytes"
+                ],
         },
     }
-
 
 # =========================================================
 # LIST APPLICATIONS
