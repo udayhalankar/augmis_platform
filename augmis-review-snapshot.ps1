@@ -25,7 +25,19 @@ $lines.Add("Branch:")
 $lines.AddRange([string[]](& git branch --show-current 2>&1))
 $lines.Add("")
 $lines.Add("Status:")
-$lines.AddRange([string[]](& git status --short 2>&1))
+$gitStatus = @(
+    & git status --short 2>&1
+)
+
+if ($gitStatus.Count -gt 0) {
+    $lines.AddRange(
+        [string[]]$gitStatus
+    )
+} else {
+    $lines.Add(
+        "CLEAN"
+    )
+}
 $lines.Add("")
 $lines.Add("Remote:")
 $lines.AddRange([string[]](& git remote -v 2>&1))

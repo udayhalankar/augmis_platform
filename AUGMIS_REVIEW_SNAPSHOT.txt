@@ -1,0 +1,228 @@
+AUGMIS REVIEW SNAPSHOT
+Generated: 2026-10-05T00:04:27.7658417+05:30
+Root: D:\Uday_Documents\AUGMIS_PLATFORM
+
+================================================================================
+GIT
+================================================================================
+Branch:
+main
+
+Status:
+
+Remote:
+origin	https://github.com/udayhalankar/augmis_platform.git (fetch)
+origin	https://github.com/udayhalankar/augmis_platform.git (push)
+
+Latest commits:
+217a5af (HEAD -> main, tag: phase4a3-complete-20261004, origin/main) Phase 4A3 complete: invitations email settings and delivery webhooks
+5e66d15 (tag: backup-step3c-3b-2026-09-25) Complete Step 3C tenant application runtime and secure gateway
+693c4df Complete Stage 7 publisher and marketplace APIs
+61e0ee6 Complete Stage 6 audit and operational health
+920415d Complete Stage 5D runtime operations
+3e346e3 Complete Stage 5C-B version upgrade policy
+e706537 Complete Stage 5C-A subscription lifecycle and instance limits
+534851c Complete Stage 5C instance limits and clean repository
+ee2187f Stop tracking environment secrets
+427f7b3 Add offers subscriptions entitlements and deployment enforcement
+
+.env tracked?
+NO
+
+================================================================================
+ALEMBIC
+================================================================================
+Current:
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+f2a7c4d91e60 (head)
+
+Heads:
+f2a7c4d91e60 (head)
+
+================================================================================
+PROJECT FILES
+================================================================================
+.env
+.gitignore
+alembic.ini
+augmis-project-files.txt
+augmis-review-snapshot.ps1
+requirements.txt
+apps\web\.env.local
+apps\web\.gitignore
+apps\web\AGENTS.md
+apps\web\CLAUDE.md
+apps\web\eslint.config.mjs
+apps\web\next-env.d.ts
+apps\web\next.config.ts
+apps\web\package-lock.json
+apps\web\package.json
+apps\web\README.md
+apps\web\tsconfig.json
+apps\web\public\file.svg
+apps\web\public\globe.svg
+apps\web\public\next.svg
+apps\web\public\vercel.svg
+apps\web\public\window.svg
+apps\web\src\theme.ts
+apps\web\src\app\favicon.ico
+apps\web\src\app\globals.css
+apps\web\src\app\layout.tsx
+apps\web\src\app\page.module.css
+apps\web\src\app\page.tsx
+apps\web\src\app\providers.tsx
+apps\web\src\app\invite\accept\page.tsx
+apps\web\src\app\login\page.tsx
+apps\web\src\app\marketplace\page.tsx
+apps\web\src\app\publisher\page.tsx
+apps\web\src\app\runtime\[runtimeId]\[[...assetPath]]\route.ts
+apps\web\src\app\settings\email\page.tsx
+apps\web\src\app\static-test\page.tsx
+apps\web\src\app\subscriptions\page.tsx
+apps\web\src\app\tenant-applications\page.tsx
+apps\web\src\app\tenants\page.tsx
+apps\web\src\app\users\page.tsx
+apps\web\src\components\app-shell.tsx
+apps\web\src\components\application-upload-dialog.tsx
+apps\web\src\components\offer-editor-dialog.tsx
+apps\web\src\components\offer-lifecycle-dialog.tsx
+apps\web\src\components\protected-route.tsx
+apps\web\src\components\static-app-preview-dialog.tsx
+apps\web\src\components\tenant-selector.tsx
+apps\web\src\context\auth-context.tsx
+apps\web\src\context\tenant-context.tsx
+apps\web\src\lib\api.ts
+apps\web\src\lib\auth-storage.ts
+apps\web\src\lib\control-center.ts
+apps\web\src\lib\invitations.ts
+apps\web\src\lib\marketplace.ts
+apps\web\src\lib\platform-settings.ts
+apps\web\src\lib\publisher-center.ts
+apps\web\src\lib\runtime-gateway.ts
+apps\web\src\lib\subscriptions.ts
+apps\web\src\lib\tenant-applications.ts
+apps\web\src\lib\tenant-context-api.ts
+apps\web\src\lib\tenant-users.ts
+apps\web\src\lib\tenants.ts
+examples\hello-app-1.1.0.zip
+examples\hello-app-2.0.0.zip
+examples\hello-app-3.0.0-fixed.zip
+examples\hello-app.zip
+examples\hello-app\augmis-app.yaml
+examples\hello-app\Dockerfile
+examples\hello-app\requirements.txt
+examples\hello-app\app\main.py
+examples\hello-app-1.1.0\augmis-app.yaml
+examples\hello-app-1.1.0\Dockerfile
+examples\hello-app-1.1.0\requirements.txt
+examples\hello-app-1.1.0\app\main.py
+examples\hello-app-2.0.0\augmis-app.yaml
+examples\hello-app-2.0.0\Dockerfile
+examples\hello-app-2.0.0\requirements.txt
+examples\hello-app-2.0.0\app\main.py
+examples\hello-app-3.0.0\augmis-app.yaml
+examples\hello-app-3.0.0\Dockerfile
+examples\hello-app-3.0.0\requirements.txt
+examples\hello-app-3.0.0\app\main.py
+packages\contracts\aaps-v1.schema.json
+services\__init__.py
+services\api\__init__.py
+services\api\alembic\env.py
+services\api\alembic\README
+services\api\alembic\script.py.mako
+services\api\alembic\versions\1aaa420cdd46_add_subscription_lifecycle_and_version_.py
+services\api\alembic\versions\3c4d1e2f7a90_add_invitation_delivery_tracking.py
+services\api\alembic\versions\42fcb1579c88_initial_platform_control_plane.py
+services\api\alembic\versions\4ace2634625e_add_audit_events.py
+services\api\alembic\versions\6b1c4f8a2d90_add_platform_user_roles.py
+services\api\alembic\versions\79b7599334bc_separate_application_version_.py
+services\api\alembic\versions\8f3c2d1a6b90_add_tenant_invitations.py
+services\api\alembic\versions\a80d91c1ee3b_add_application_builds.py
+services\api\alembic\versions\bdbef5a8b5a8_add_identity_memberships_and_rbac.py
+services\api\alembic\versions\c32cde99efe0_add_tenants_and_application_runtime.py
+services\api\alembic\versions\c66c624de583_add_offers_subscriptions_and_.py
+services\api\alembic\versions\e7a4b2c91d30_add_platform_email_settings.py
+services\api\alembic\versions\f2a7c4d91e60_add_real_email_delivery_tracking.py
+services\api\alembic\versions\fabeaf747b06_add_tenants_and_application_runtime.py
+services\api\app\__init__.py
+services\api\app\main.py
+services\api\app\core\__init__.py
+services\api\app\core\auth.py
+services\api\app\core\config.py
+services\api\app\db\__init__.py
+services\api\app\db\base.py
+services\api\app\db\session.py
+services\api\app\models\__init__.py
+services\api\app\models\audit.py
+services\api\app\models\commerce.py
+services\api\app\models\email_delivery.py
+services\api\app\models\iam.py
+services\api\app\models\platform_settings.py
+services\api\app\models\platform.py
+services\api\app\routes\__init__.py
+services\api\app\routes\applications.py
+services\api\app\routes\audit.py
+services\api\app\routes\auth.py
+services\api\app\routes\health.py
+services\api\app\routes\instances.py
+services\api\app\routes\invitations.py
+services\api\app\routes\memberships.py
+services\api\app\routes\offers.py
+services\api\app\routes\operations.py
+services\api\app\routes\platform_settings.py
+services\api\app\routes\publishers.py
+services\api\app\routes\subscriptions.py
+services\api\app\routes\tenant_users.py
+services\api\app\routes\tenants.py
+services\api\app\routes\webhooks.py
+services\api\app\schemas\__init__.py
+services\api\app\schemas\auth.py
+services\api\app\schemas\instance.py
+services\api\app\schemas\invitation.py
+services\api\app\schemas\offer.py
+services\api\app\schemas\platform_settings.py
+services\api\app\schemas\publisher.py
+services\api\app\schemas\subscription.py
+services\api\app\schemas\tenant_user.py
+services\api\app\schemas\tenant.py
+services\api\app\services\__init__.py
+services\api\app\services\audit_service.py
+services\api\app\services\auth_service.py
+services\api\app\services\authorization_service.py
+services\api\app\services\build_engine.py
+services\api\app\services\deployment_engine.py
+services\api\app\services\email_delivery_service.py
+services\api\app\services\email_service.py
+services\api\app\services\entitlement_service.py
+services\api\app\services\instance_limit_service.py
+services\api\app\services\invitation_service.py
+services\api\app\services\membership_service.py
+services\api\app\services\old-email_service.py
+services\api\app\services\platform_settings_service.py
+services\api\app\services\static_package_service.py
+services\api\app\services\subscription_lifecycle_service.py
+services\api\app\services\tenant_user_service.py
+services\api\app\services\version_policy_service.py
+tools\__init__.py
+tools\seed_rbac.py
+tools\validate_package.py
+
+================================================================================
+PHASE 4 KEY FILES
+================================================================================
+FOUND   services\api\app\models\iam.py
+FOUND   services\api\app\models\email_delivery.py
+FOUND   services\api\app\routes\invitations.py
+FOUND   services\api\app\routes\tenant_users.py
+FOUND   services\api\app\routes\memberships.py
+FOUND   services\api\app\routes\webhooks.py
+FOUND   services\api\app\services\authorization_service.py
+FOUND   services\api\app\services\invitation_service.py
+FOUND   services\api\app\services\tenant_user_service.py
+FOUND   services\api\app\services\membership_service.py
+FOUND   services\api\app\services\email_delivery_service.py
+FOUND   apps\web\src\app\users\page.tsx
+FOUND   apps\web\src\lib\tenant-users.ts
+FOUND   apps\web\src\lib\invitations.ts
+FOUND   tools\seed_rbac.py

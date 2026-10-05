@@ -35,6 +35,7 @@ from services.api.app.schemas.tenant_user import (
 
 from services.api.app.services.authorization_service import (
     AuthorizationError,
+    require_any_tenant_permission,
     require_tenant_permission,
 )
 
@@ -54,10 +55,14 @@ router = APIRouter(
 )
 
 
-def _require_tenant_user_management(
+# ============================================================
+# TENANT RESOLUTION
+# ============================================================
+
+
+def _load_tenant(
     *,
     db: Session,
-    current_user: User,
     tenant_id: uuid.UUID,
 ) -> Tenant:
 
@@ -73,6 +78,73 @@ def _require_tenant_user_management(
             detail="Tenant not found",
         )
 
+    return tenant
+
+
+# ============================================================
+# TENANT USERS — READ AUTHORIZATION
+# ============================================================
+
+
+def _require_tenant_user_view(
+    *,
+    db: Session,
+    current_user: User,
+    tenant_id: uuid.UUID,
+) -> Tenant:
+
+    tenant = (
+        _load_tenant(
+            db=db,
+            tenant_id=tenant_id,
+        )
+    )
+
+
+    try:
+
+        require_any_tenant_permission(
+            db=db,
+            user=current_user,
+            tenant_id=tenant.id,
+            permission_codes={
+                "tenant.users.view",
+                "tenant.users.manage",
+            },
+        )
+
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+
+    return tenant
+
+
+# ============================================================
+# TENANT USERS — MANAGEMENT AUTHORIZATION
+# ============================================================
+
+
+def _require_tenant_user_management(
+    *,
+    db: Session,
+    current_user: User,
+    tenant_id: uuid.UUID,
+) -> Tenant:
+
+    tenant = (
+        _load_tenant(
+            db=db,
+            tenant_id=tenant_id,
+        )
+    )
+
+
     try:
 
         require_tenant_permission(
@@ -84,6 +156,7 @@ def _require_tenant_user_management(
             ),
         )
 
+
     except AuthorizationError as error:
 
         raise HTTPException(
@@ -91,7 +164,13 @@ def _require_tenant_user_management(
             detail=str(error),
         ) from error
 
+
     return tenant
+
+
+# ============================================================
+# SERVICE ERROR MAPPING
+# ============================================================
 
 
 def _raise_service_error(
@@ -102,6 +181,11 @@ def _raise_service_error(
         status_code=error.status_code,
         detail=str(error),
     ) from error
+
+
+# ============================================================
+# LIST TENANT USERS
+# ============================================================
 
 
 @router.get(
@@ -122,16 +206,22 @@ def get_tenant_users(
     ),
 ):
 
-    _require_tenant_user_management(
+    _require_tenant_user_view(
         db=db,
         current_user=current_user,
         tenant_id=tenant_id,
     )
 
+
     return list_tenant_users(
         db=db,
         tenant_id=tenant_id,
     )
+
+
+# ============================================================
+# LIST TENANT ROLES
+# ============================================================
 
 
 @router.get(
@@ -152,15 +242,21 @@ def get_tenant_roles(
     ),
 ):
 
-    _require_tenant_user_management(
+    _require_tenant_user_view(
         db=db,
         current_user=current_user,
         tenant_id=tenant_id,
     )
 
+
     return list_tenant_roles(
         db=db,
     )
+
+
+# ============================================================
+# ADD EXISTING AUGMIS USER
+# ============================================================
 
 
 @router.post(
@@ -190,23 +286,29 @@ def add_tenant_user(
         tenant_id=tenant_id,
     )
 
+
     try:
 
         return (
             add_existing_user_to_tenant(
                 db=db,
+
                 tenant_id=tenant_id,
+
                 actor_user_id=(
                     current_user.id
                 ),
+
                 email=str(
                     payload.email
                 ),
+
                 role_codes=(
                     payload.role_codes
                 ),
             )
         )
+
 
     except TenantUserServiceError as error:
 
@@ -215,6 +317,11 @@ def add_tenant_user(
         _raise_service_error(
             error
         )
+
+
+# ============================================================
+# REPLACE MEMBERSHIP ROLES
+# ============================================================
 
 
 @router.put(
@@ -247,23 +354,29 @@ def update_tenant_user_roles(
         tenant_id=tenant_id,
     )
 
+
     try:
 
         return (
             replace_membership_roles(
                 db=db,
+
                 tenant_id=tenant_id,
+
                 membership_id=(
                     membership_id
                 ),
+
                 actor_user_id=(
                     current_user.id
                 ),
+
                 role_codes=(
                     payload.role_codes
                 ),
             )
         )
+
 
     except TenantUserServiceError as error:
 
@@ -272,6 +385,11 @@ def update_tenant_user_roles(
         _raise_service_error(
             error
         )
+
+
+# ============================================================
+# SUSPEND MEMBERSHIP
+# ============================================================
 
 
 @router.post(
@@ -301,19 +419,25 @@ def suspend_tenant_user(
         tenant_id=tenant_id,
     )
 
+
     try:
 
         return set_membership_status(
             db=db,
+
             tenant_id=tenant_id,
+
             membership_id=(
                 membership_id
             ),
+
             actor_user_id=(
                 current_user.id
             ),
+
             new_status="suspended",
         )
+
 
     except TenantUserServiceError as error:
 
@@ -322,6 +446,11 @@ def suspend_tenant_user(
         _raise_service_error(
             error
         )
+
+
+# ============================================================
+# ACTIVATE MEMBERSHIP
+# ============================================================
 
 
 @router.post(
@@ -351,19 +480,25 @@ def activate_tenant_user(
         tenant_id=tenant_id,
     )
 
+
     try:
 
         return set_membership_status(
             db=db,
+
             tenant_id=tenant_id,
+
             membership_id=(
                 membership_id
             ),
+
             actor_user_id=(
                 current_user.id
             ),
+
             new_status="active",
         )
+
 
     except TenantUserServiceError as error:
 
@@ -372,6 +507,11 @@ def activate_tenant_user(
         _raise_service_error(
             error
         )
+
+
+# ============================================================
+# REVOKE MEMBERSHIP
+# ============================================================
 
 
 @router.post(
@@ -401,19 +541,25 @@ def revoke_tenant_user(
         tenant_id=tenant_id,
     )
 
+
     try:
 
         return set_membership_status(
             db=db,
+
             tenant_id=tenant_id,
+
             membership_id=(
                 membership_id
             ),
+
             actor_user_id=(
                 current_user.id
             ),
+
             new_status="revoked",
         )
+
 
     except TenantUserServiceError as error:
 

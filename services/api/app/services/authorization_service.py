@@ -1,8 +1,11 @@
+# services/api/app/services/authorization_service.py
+
 from __future__ import annotations
 
 import uuid
 
 from sqlalchemy import select
+
 from sqlalchemy.orm import Session
 
 from services.api.app.models.iam import (
@@ -18,8 +21,15 @@ from services.api.app.models.iam import (
 )
 
 
-class AuthorizationError(Exception):
+class AuthorizationError(
+    Exception
+):
     pass
+
+
+# ============================================================
+# MEMBERSHIP RESOLUTION
+# ============================================================
 
 
 def get_tenant_membership(
@@ -29,11 +39,18 @@ def get_tenant_membership(
 ) -> TenantMembership | None:
 
     return db.scalar(
-        select(TenantMembership)
+        select(
+            TenantMembership
+        )
         .where(
-            TenantMembership.user_id == user_id,
-            TenantMembership.tenant_id == tenant_id,
-            TenantMembership.status == "active"
+            TenantMembership.user_id
+            == user_id,
+
+            TenantMembership.tenant_id
+            == tenant_id,
+
+            TenantMembership.status
+            == "active"
         )
     )
 
@@ -45,13 +62,25 @@ def get_publisher_membership(
 ) -> PublisherMembership | None:
 
     return db.scalar(
-        select(PublisherMembership)
+        select(
+            PublisherMembership
+        )
         .where(
-            PublisherMembership.user_id == user_id,
-            PublisherMembership.publisher_id == publisher_id,
-            PublisherMembership.status == "active"
+            PublisherMembership.user_id
+            == user_id,
+
+            PublisherMembership.publisher_id
+            == publisher_id,
+
+            PublisherMembership.status
+            == "active"
         )
     )
+
+
+# ============================================================
+# TENANT PERMISSION RESOLUTION
+# ============================================================
 
 
 def get_tenant_permissions(
@@ -60,7 +89,9 @@ def get_tenant_permissions(
 ) -> set[str]:
 
     rows = db.execute(
-        select(Permission.code)
+        select(
+            Permission.code
+        )
         .join(
             RolePermission,
             RolePermission.permission_id
@@ -71,9 +102,17 @@ def get_tenant_permissions(
             TenantMembershipRole.role_id
             == RolePermission.role_id
         )
+        .join(
+            Role,
+            Role.id
+            == RolePermission.role_id
+        )
         .where(
             TenantMembershipRole.membership_id
-            == membership_id
+            == membership_id,
+
+            Role.scope_type
+            == "tenant"
         )
     ).all()
 
@@ -83,13 +122,20 @@ def get_tenant_permissions(
     }
 
 
+# ============================================================
+# PUBLISHER PERMISSION RESOLUTION
+# ============================================================
+
+
 def get_publisher_permissions(
     db: Session,
     membership_id: uuid.UUID
 ) -> set[str]:
 
     rows = db.execute(
-        select(Permission.code)
+        select(
+            Permission.code
+        )
         .join(
             RolePermission,
             RolePermission.permission_id
@@ -100,9 +146,17 @@ def get_publisher_permissions(
             PublisherMembershipRole.role_id
             == RolePermission.role_id
         )
+        .join(
+            Role,
+            Role.id
+            == RolePermission.role_id
+        )
         .where(
             PublisherMembershipRole.membership_id
-            == membership_id
+            == membership_id,
+
+            Role.scope_type
+            == "publisher"
         )
     ).all()
 
@@ -110,6 +164,12 @@ def get_publisher_permissions(
         row[0]
         for row in rows
     }
+
+
+# ============================================================
+# PLATFORM PERMISSION RESOLUTION
+# ============================================================
+
 
 def get_platform_permissions(
     db: Session,
@@ -138,6 +198,7 @@ def get_platform_permissions(
         .where(
             PlatformUserRole.user_id
             == user_id,
+
             Role.scope_type
             == "platform",
         )
@@ -147,6 +208,11 @@ def get_platform_permissions(
         row[0]
         for row in rows
     }
+
+
+# ============================================================
+# PLATFORM AUTHORIZATION
+# ============================================================
 
 
 def require_platform_permission(
@@ -166,10 +232,19 @@ def require_platform_permission(
         permission_code
         not in permissions
     ):
+
         raise AuthorizationError(
-            "Missing platform permission: "
-            f"{permission_code}"
+            (
+                "Missing platform permission: "
+                f"{permission_code}"
+            )
         )
+
+
+# ============================================================
+# TENANT AUTHORIZATION
+# ============================================================
+
 
 def require_tenant_permission(
     db: Session,
@@ -178,10 +253,12 @@ def require_tenant_permission(
     permission_code: str
 ) -> TenantMembership:
 
-    membership = get_tenant_membership(
-        db=db,
-        user_id=user.id,
-        tenant_id=tenant_id
+    membership = (
+        get_tenant_membership(
+            db=db,
+            user_id=user.id,
+            tenant_id=tenant_id
+        )
     )
 
     if not membership:
@@ -190,19 +267,89 @@ def require_tenant_permission(
             "You do not belong to this tenant."
         )
 
-    permissions = get_tenant_permissions(
-        db=db,
-        membership_id=membership.id
+
+    permissions = (
+        get_tenant_permissions(
+            db=db,
+            membership_id=membership.id
+        )
     )
 
-    if permission_code not in permissions:
+
+    if (
+        permission_code
+        not in permissions
+    ):
 
         raise AuthorizationError(
-            f"Missing tenant permission: "
-            f"{permission_code}"
+            (
+                "Missing tenant permission: "
+                f"{permission_code}"
+            )
         )
 
+
     return membership
+
+
+def require_any_tenant_permission(
+    db: Session,
+    user: User,
+    tenant_id: uuid.UUID,
+    permission_codes: set[str],
+) -> TenantMembership:
+
+    membership = (
+        get_tenant_membership(
+            db=db,
+            user_id=user.id,
+            tenant_id=tenant_id
+        )
+    )
+
+
+    if not membership:
+
+        raise AuthorizationError(
+            "You do not belong to this tenant."
+        )
+
+
+    permissions = (
+        get_tenant_permissions(
+            db=db,
+            membership_id=membership.id
+        )
+    )
+
+
+    matching_permissions = (
+        permissions
+        & permission_codes
+    )
+
+
+    if not matching_permissions:
+
+        raise AuthorizationError(
+            (
+                "Missing tenant permission. "
+                "One of the following is required: "
+                + ", ".join(
+                    sorted(
+                        permission_codes
+                    )
+                )
+            )
+        )
+
+
+    return membership
+
+
+# ============================================================
+# PUBLISHER AUTHORIZATION
+# ============================================================
 
 
 def require_publisher_permission(
@@ -212,11 +359,14 @@ def require_publisher_permission(
     permission_code: str
 ) -> PublisherMembership:
 
-    membership = get_publisher_membership(
-        db=db,
-        user_id=user.id,
-        publisher_id=publisher_id
+    membership = (
+        get_publisher_membership(
+            db=db,
+            user_id=user.id,
+            publisher_id=publisher_id
+        )
     )
+
 
     if not membership:
 
@@ -224,16 +374,26 @@ def require_publisher_permission(
             "You do not belong to this publisher."
         )
 
-    permissions = get_publisher_permissions(
-        db=db,
-        membership_id=membership.id
+
+    permissions = (
+        get_publisher_permissions(
+            db=db,
+            membership_id=membership.id
+        )
     )
 
-    if permission_code not in permissions:
+
+    if (
+        permission_code
+        not in permissions
+    ):
 
         raise AuthorizationError(
-            f"Missing publisher permission: "
-            f"{permission_code}"
+            (
+                "Missing publisher permission: "
+                f"{permission_code}"
+            )
         )
+
 
     return membership

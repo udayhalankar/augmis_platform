@@ -1,156 +1,144 @@
 # tools/seed_rbac.py
+
 from sqlalchemy import select
 
-from services.api.app.db.session import SessionLocal
+from services.api.app.core.rbac_catalog import (
+    PERMISSION_DEFINITIONS,
+    ROLE_BLUEPRINTS,
+)
+
+from services.api.app.db.session import (
+    SessionLocal,
+)
 
 from services.api.app.models.iam import (
     Permission,
     Role,
-    RolePermission
+    RolePermission,
 )
 
 
-PERMISSIONS = {
-
-    "platform.settings.manage":
-        "Manage platform settings",
-
-    "tenant.manage":
-        "Manage tenant",
-
-    "tenant.users.manage":
-        "Manage tenant users",
-
-    "application.deploy":
-        "Deploy applications",
-
-    "application.instance.view":
-        "View application instances",
-
-    "application.instance.stop":
-        "Stop application instances",
-
-    "audit.view":
-    "View tenant audit events",
-
-    "publisher.manage":
-        "Manage publisher",
-
-    "application.upload":
-        "Upload application packages",
-
-    "application.manage":
-        "Manage publisher applications",
-
-    "offer.manage":
-        "Manage application offers",
-
-    "subscription.view":
-        "View subscriptions",
-
-    "subscription.manage":
-        "Manage subscriptions"
-}
-
-
-ROLES = {
-
-    ("platform", "platform_owner"): {
-        "name":
-            "Platform Owner",
-
-        "permissions": [
-            "platform.settings.manage",
-        ]
-    },
-
-    ("tenant", "tenant_owner"): {
-        "name":
-            "Tenant Owner",
-
-        "permissions": [
-            "tenant.manage",
-            "tenant.users.manage",
-            "application.deploy",
-            "application.instance.view",
-            "application.instance.stop",
-            "subscription.view",
-            "subscription.manage",
-            "audit.view"
-        ]
-    },
-
-    ("tenant", "tenant_user"): {
-        "name":
-            "Tenant User",
-
-        "permissions": [
-            "application.instance.view",
-            "subscription.view"
-        ]
-    },
-
-    ("publisher", "publisher_owner"): {
-        "name":
-            "Publisher Owner",
-
-        "permissions": [
-            "publisher.manage",
-            "application.upload",
-            "application.manage",
-            "offer.manage"
-        ]
-    },
-
-    ("publisher", "publisher_developer"): {
-        "name":
-            "Publisher Developer",
-
-        "permissions": [
-            "application.upload",
-            "application.manage"
-        ]
-    }
-}
+# ============================================================
+# AUGMIS RBAC SEED
+# ============================================================
+#
+# This seed is deliberately idempotent.
+#
+# Running:
+#
+#     python -m tools.seed_rbac
+#
+# multiple times must not create duplicate:
+#
+# - permissions
+# - roles
+# - role-permission assignments
+#
+# Canonical definitions are held in:
+#
+#     services/api/app/core/rbac_catalog.py
+#
+# ============================================================
 
 
 def main():
 
     db = SessionLocal()
 
+
     try:
 
-        permission_map = {}
+        # ----------------------------------------------------
+        # PERMISSION MAP
+        # ----------------------------------------------------
 
-        for code, name in PERMISSIONS.items():
+        permission_map: dict[
+            str,
+            Permission
+        ] = {}
+
+
+        # ----------------------------------------------------
+        # CREATE / UPDATE PERMISSIONS
+        # ----------------------------------------------------
+
+        for (
+            permission_code,
+            definition
+        ) in (
+            PERMISSION_DEFINITIONS.items()
+        ):
 
             permission = db.scalar(
-                select(Permission)
+                select(
+                    Permission
+                )
                 .where(
-                    Permission.code == code
+                    Permission.code
+                    == permission_code
                 )
             )
 
+
             if not permission:
 
-                permission = Permission(
-                    code=code,
-                    name=name
+                permission = (
+                    Permission(
+                        code=(
+                            permission_code
+                        ),
+
+                        name=(
+                            definition[
+                                "name"
+                            ]
+                        ),
+                    )
                 )
 
-                db.add(permission)
+
+                db.add(
+                    permission
+                )
+
 
                 db.flush()
 
-            permission_map[code] = permission
+
+            else:
+
+                # --------------------------------------------
+                # Keep display names synchronized with the
+                # canonical catalogue without replacing IDs.
+                # --------------------------------------------
+
+                permission.name = (
+                    definition[
+                        "name"
+                    ]
+                )
+
+
+            permission_map[
+                permission_code
+            ] = permission
+
+
+        # ----------------------------------------------------
+        # CREATE / UPDATE ROLES
+        # ----------------------------------------------------
 
         for (
             scope_type,
             role_code
-        ), data in ROLES.items():
+        ), definition in (
+            ROLE_BLUEPRINTS.items()
+        ):
 
             role = db.scalar(
-                select(Role)
+                select(
+                    Role
+                )
                 .where(
                     Role.scope_type
                     == scope_type,
@@ -160,21 +148,64 @@ def main():
                 )
             )
 
+
             if not role:
 
                 role = Role(
-                    scope_type=scope_type,
-                    code=role_code,
-                    name=data["name"]
+                    scope_type=(
+                        scope_type
+                    ),
+
+                    code=(
+                        role_code
+                    ),
+
+                    name=(
+                        definition[
+                            "name"
+                        ]
+                    ),
                 )
 
-                db.add(role)
+
+                db.add(
+                    role
+                )
+
 
                 db.flush()
 
-            for permission_code in data[
-                "permissions"
-            ]:
+
+            else:
+
+                # --------------------------------------------
+                # Keep role display name synchronized.
+                #
+                # Existing role IDs and assignments remain
+                # untouched.
+                # --------------------------------------------
+
+                role.name = (
+                    definition[
+                        "name"
+                    ]
+                )
+
+
+            # ------------------------------------------------
+            # ENSURE ROLE-PERMISSION ASSIGNMENTS
+            # ------------------------------------------------
+
+            permission_codes = (
+                definition[
+                    "permissions"
+                ]
+            )
+
+
+            for permission_code in (
+                permission_codes
+            ):
 
                 permission = (
                     permission_map[
@@ -182,31 +213,59 @@ def main():
                     ]
                 )
 
-                existing = db.scalar(
-                    select(RolePermission)
-                    .where(
-                        RolePermission.role_id
-                        == role.id,
 
-                        RolePermission.permission_id
-                        == permission.id
+                existing_assignment = (
+                    db.scalar(
+                        select(
+                            RolePermission
+                        )
+                        .where(
+                            RolePermission.role_id
+                            == role.id,
+
+                            RolePermission.permission_id
+                            == permission.id
+                        )
                     )
                 )
 
-                if not existing:
 
-                    db.add(
-                        RolePermission(
-                            role_id=role.id,
-                            permission_id=permission.id
-                        )
+                if existing_assignment:
+
+                    continue
+
+
+                db.add(
+                    RolePermission(
+                        role_id=(
+                            role.id
+                        ),
+
+                        permission_id=(
+                            permission.id
+                        ),
                     )
+                )
+
+
+        # ----------------------------------------------------
+        # COMMIT COMPLETE RBAC SEED
+        # ----------------------------------------------------
 
         db.commit()
+
 
         print(
             "RBAC SEED COMPLETE"
         )
+
+
+    except Exception:
+
+        db.rollback()
+
+        raise
+
 
     finally:
 
@@ -214,4 +273,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()

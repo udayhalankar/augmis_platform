@@ -1,0 +1,14 @@
+For AUGMIS development:
+
+1. Always consult the AUGMIS project architecture, folder structure, UI design system, AppShell reference, and reusable component catalogue before proposing new files, routes, contexts, providers, or components.
+2. Extend existing patterns before creating parallel implementations.
+3. Preserve working functionality outside the requested scope.
+4. Prefer targeted edits. Use a full drop-in replacement only when explicitly requested, when the file is already structurally damaged, or when replacement is materially safer than piecemeal edits.
+5. Never create a duplicate root provider tree. The canonical frontend provider file is `apps/web/src/app/providers.tsx`.
+6. All authenticated platform pages should reuse `ProtectedRoute` + `AppShell`; do not recreate global navigation, tenant selection, user chrome, environment indicators, or status strips.
+7. Tenant-scoped pages must use the global `TenantProvider` / `useTenant()` context and must not maintain a competing page-local selected tenant.
+8. Frontend API calls should use or extend the existing domain helpers under `apps/web/src/lib/` before embedding duplicate request logic into pages.
+9. Backend changes should follow the existing FastAPI layers: routes → schemas/services → models/db. Keep authorization authoritative on the backend.
+10. Do not modify static-runtime or runtime-gateway security behavior as a side effect of unrelated tenant/user/RBAC UI work.
+11. Before adding a file, verify that an equivalent does not already exist in the repository.
+12. After structural changes, regression-test the previously working flow before proceeding to the next development step.
