@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  AdminPanelSettingsOutlined,
+  EmailOutlined,
   AppsOutlined,
   DashboardOutlined,
   DomainOutlined,
@@ -18,6 +20,10 @@ import {
 import {
   Avatar,
   Box,
+  ListItemIcon,
+  ListItemText,
+  Menu,
+  MenuItem,
   IconButton,
   Stack,
   Typography,
@@ -25,16 +31,31 @@ import {
 
 import {  usePathname, useRouter } from "next/navigation";
 
+import {
+  useState,
+} from "react";
+
 import type { ReactNode } from "react";
 
 import {
   useAuth,
 } from "@/context/auth-context";
 
+import {
+  usePermissions,
+} from "@/context/permission-context";
+
 import TenantSelector
   from "@/components/tenant-selector";
 
-const navigation = [
+type NavigationItem = {
+  label: string;
+  href: string;
+  icon: ReactNode;
+  tenantPermission?: string;
+};
+
+const navigation: NavigationItem[] = [
   {
     label: "Control Center",
     href: "/",
@@ -89,18 +110,22 @@ const navigation = [
       />
     ),
   },
-  {
+    {
     label: "Users",
     href: "/users",
+    tenantPermission:
+      "tenant.users.view",
     icon: (
       <PeopleOutlined
         fontSize="small"
       />
     ),
   },
-  {
+    {
     label: "Audit",
     href: "/audit",
+    tenantPermission:
+      "audit.view",
     icon: (
       <HistoryOutlined
         fontSize="small"
@@ -136,6 +161,61 @@ export default function AppShell({
     logout,
   } = useAuth();
 
+    const {
+    hasPlatformPermission,
+    hasTenantPermission,
+  } = usePermissions();
+
+
+  const [
+    settingsAnchor,
+    setSettingsAnchor,
+  ] =
+    useState<HTMLElement | null>(
+      null
+    );
+
+
+  const canManageEmailSettings =
+    hasPlatformPermission(
+      "platform.settings.manage"
+    );
+
+
+  const canManageRbac =
+    hasPlatformPermission(
+      "platform.rbac.manage"
+    );
+
+
+  const hasSettingsAccess =
+    canManageEmailSettings ||
+    canManageRbac;
+
+
+  const visibleNavigation =
+    navigation.filter(
+      (item) =>
+        !item.tenantPermission ||
+        hasTenantPermission(
+          item.tenantPermission
+        )
+    );
+
+
+  const openSettingsPage =
+    (
+      href: string
+    ) => {
+
+      setSettingsAnchor(
+        null
+      );
+
+      router.push(
+        href
+      );
+    };
 
   const handleLogout = () => {
 
@@ -305,16 +385,92 @@ export default function AppShell({
           </IconButton>
 
 
-          <IconButton
-            aria-label="Settings"
-            onClick={() =>
-              router.push(
-                "/settings/email"
-              )
-            }
-          >
-            <SettingsOutlined />
-          </IconButton>
+                    {hasSettingsAccess && (
+            <>
+              <IconButton
+                aria-label="Settings"
+                aria-controls={
+                  settingsAnchor
+                    ? "augmis-settings-menu"
+                    : undefined
+                }
+                aria-haspopup="true"
+                aria-expanded={
+                  settingsAnchor
+                    ? "true"
+                    : undefined
+                }
+                onClick={
+                  (event) =>
+                    setSettingsAnchor(
+                      event.currentTarget
+                    )
+                }
+              >
+                <SettingsOutlined />
+              </IconButton>
+
+              <Menu
+                id="augmis-settings-menu"
+                anchorEl={
+                  settingsAnchor
+                }
+                open={
+                  Boolean(
+                    settingsAnchor
+                  )
+                }
+                onClose={
+                  () =>
+                    setSettingsAnchor(
+                      null
+                    )
+                }
+              >
+                {canManageEmailSettings && (
+                  <MenuItem
+                    onClick={
+                      () =>
+                        openSettingsPage(
+                          "/settings/email"
+                        )
+                    }
+                  >
+                    <ListItemIcon>
+                      <EmailOutlined
+                        fontSize="small"
+                      />
+                    </ListItemIcon>
+
+                    <ListItemText
+                      primary="Email Delivery"
+                    />
+                  </MenuItem>
+                )}
+
+                {canManageRbac && (
+                  <MenuItem
+                    onClick={
+                      () =>
+                        openSettingsPage(
+                          "/settings/rbac"
+                        )
+                    }
+                  >
+                    <ListItemIcon>
+                      <AdminPanelSettingsOutlined
+                        fontSize="small"
+                      />
+                    </ListItemIcon>
+
+                    <ListItemText
+                      primary="RBAC Administration"
+                    />
+                  </MenuItem>
+                )}
+              </Menu>
+            </>
+          )}
 
 
           <Box
@@ -423,7 +579,7 @@ export default function AppShell({
           spacing={0}
         >
 
-          {navigation.map(
+          {visibleNavigation.map(
   (item) => {
 
     const active =

@@ -17,6 +17,10 @@ import {
   TenantProvider,
 } from "@/context/tenant-context";
 
+import {
+  PermissionProvider,
+} from "@/context/permission-context";
+
 import theme from "@/theme";
 
 
@@ -35,7 +39,11 @@ export default function Providers({
       <AuthProvider>
 
         <TenantProvider>
-          {children}
+
+          <PermissionProvider>
+            {children}
+          </PermissionProvider>
+
         </TenantProvider>
 
       </AuthProvider>

@@ -7,6 +7,10 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from services.api.app.core.rbac_catalog import (
+    role_is_protected,
+)
+
 from services.api.app.models.iam import (
     Role,
     TenantMembership,
@@ -20,6 +24,11 @@ from services.api.app.services.audit_service import (
 
 from services.api.app.services.auth_service import (
     normalize_email,
+)
+
+from services.api.app.services.authorization_service import (
+    AuthorizationError,
+    require_protected_tenant_role_manager,
 )
 
 
@@ -325,6 +334,52 @@ def _membership_has_role(
     )
 
 
+
+def _roles_include_protected_tenant_role(
+    roles: list[Role],
+) -> bool:
+
+    return any(
+        role_is_protected(
+            "tenant",
+            role.code,
+        )
+        for role in roles
+    )
+
+
+def _membership_has_protected_tenant_role(
+    db: Session,
+    membership_id: uuid.UUID,
+) -> bool:
+
+    return _roles_include_protected_tenant_role(
+        _membership_roles(
+            db=db,
+            membership_id=membership_id,
+        )
+    )
+
+
+def _require_actor_can_manage_protected_tenant_roles(
+    db: Session,
+    tenant_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+) -> None:
+
+    try:
+        require_protected_tenant_role_manager(
+            db=db,
+            user_id=actor_user_id,
+            tenant_id=tenant_id,
+        )
+
+    except AuthorizationError as error:
+        raise TenantUserServiceError(
+            str(error),
+            status_code=403,
+        ) from error
+
 def _has_other_active_owner(
     db: Session,
     tenant_id: uuid.UUID,
@@ -553,6 +608,15 @@ def add_existing_user_to_tenant(
         )
     )
 
+    if _roles_include_protected_tenant_role(
+        roles
+    ):
+        _require_actor_can_manage_protected_tenant_roles(
+            db=db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+        )
+
     membership = (
         TenantMembership(
             tenant_id=tenant_id,
@@ -665,6 +729,20 @@ def replace_membership_roles(
             membership_id=membership.id,
         )
     )
+
+    if (
+        _roles_include_protected_tenant_role(
+            previous_roles
+        )
+        or _roles_include_protected_tenant_role(
+            new_roles
+        )
+    ):
+        _require_actor_can_manage_protected_tenant_roles(
+            db=db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+        )
 
     previous_codes = {
         role.code
@@ -808,6 +886,16 @@ def set_membership_status(
             db=db,
             membership=membership,
             user=user,
+        )
+
+    if _membership_has_protected_tenant_role(
+        db=db,
+        membership_id=membership.id,
+    ):
+        _require_actor_can_manage_protected_tenant_roles(
+            db=db,
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
         )
 
     if new_status in {

@@ -52,10 +52,20 @@ import SearchOutlined from "@mui/icons-material/SearchOutlined";
 
 import AppShell from "@/components/app-shell";
 import ProtectedRoute from "@/components/protected-route";
+import PermissionGuard
+  from "@/components/permission-guard";
+
+import {
+  useAuth,
+} from "@/context/auth-context";
 
 import {
   useTenant,
 } from "@/context/tenant-context";
+
+import {
+  usePermissions,
+} from "@/context/permission-context";
 
 import {
   activateTenantUser,
@@ -262,13 +272,49 @@ function formatDate(
 }
 
 
+function hasTenantOwnerRole(
+  roleRows: Array<{
+    code: string;
+  }>
+): boolean {
+  return roleRows.some(
+    (role) =>
+      role.code ===
+        "tenant_owner"
+  );
+}
+
+
 export default function UsersPage() {
+  const {
+    user,
+  } = useAuth();
+
   const {
     selectedTenant,
     selectedTenantId,
     loading: tenantLoading,
     error: tenantContextError,
   } = useTenant();
+
+    const {
+    tenantLoading:
+      permissionLoading,
+
+    hasTenantPermission,
+  } = usePermissions();
+
+
+  const canViewUsers =
+    hasTenantPermission(
+      "tenant.users.view"
+    );
+
+
+  const canManageUsers =
+    hasTenantPermission(
+      "tenant.users.manage"
+    );
 
   const [
     memberships,
@@ -421,18 +467,21 @@ export default function UsersPage() {
     useState(false);
 
 
-  const loadData =
+    const loadData =
     useCallback(
       async (
         tenantId: string
       ) => {
+
         const cleanTenantId =
           tenantId.trim();
 
         if (!cleanTenantId) {
+
           setMemberships([]);
           setRoles([]);
           setInvitations([]);
+
           return;
         }
 
@@ -440,22 +489,30 @@ export default function UsersPage() {
         setError("");
 
         try {
+
+          /*
+           * Read-only tenant administrators
+           * may view users and roles.
+           *
+           * Invitations are administration
+           * data and are loaded only when the
+           * caller has tenant.users.manage.
+           */
+
           const [
             membershipRows,
             roleRows,
-            invitationRows,
           ] =
             await Promise.all([
               loadTenantUsers(
                 cleanTenantId
               ),
+
               loadTenantRoles(
                 cleanTenantId
               ),
-              loadTenantInvitations(
-                cleanTenantId
-              ),
             ]);
+
 
           setMemberships(
             membershipRows
@@ -465,10 +522,25 @@ export default function UsersPage() {
             roleRows
           );
 
-          setInvitations(
-            invitationRows
-          );
+
+          if (canManageUsers) {
+
+            const invitationRows =
+              await loadTenantInvitations(
+                cleanTenantId
+              );
+
+            setInvitations(
+              invitationRows
+            );
+
+          } else {
+
+            setInvitations([]);
+          }
+
         } catch (loadError) {
+
           setMemberships([]);
           setRoles([]);
           setInvitations([]);
@@ -479,43 +551,97 @@ export default function UsersPage() {
               "Tenant users could not be loaded."
             )
           );
+
         } finally {
+
           setLoading(false);
         }
       },
-      []
+      [
+        canManageUsers,
+      ]
     );
 
 
-  useEffect(
+   useEffect(
     () => {
-      if (tenantLoading) {
+
+      if (
+        tenantLoading ||
+        permissionLoading
+      ) {
         return;
       }
+
 
       setSearch("");
       setMessage("");
       setError("");
+
       setAddDialogOpen(false);
       setInviteDialogOpen(false);
-      setCreatedInvitation(null);
-      setRoleTarget(null);
 
-      if (!selectedTenantId) {
+      setCreatedInvitation(
+        null
+      );
+
+      setRoleTarget(
+        null
+      );
+
+
+      if (
+        !selectedTenantId ||
+        !canViewUsers
+      ) {
+
         setMemberships([]);
         setRoles([]);
         setInvitations([]);
+
         return;
       }
 
-      loadData(
+
+      void loadData(
         selectedTenantId
       );
     },
     [
       tenantLoading,
+      permissionLoading,
       selectedTenantId,
+      canViewUsers,
       loadData,
+    ]
+  );
+
+    useEffect(
+    () => {
+
+      /*
+       * If permissions change while a
+       * management dialog is open, close
+       * the privileged interaction.
+       */
+
+      if (!canManageUsers) {
+
+        setAddDialogOpen(false);
+
+        setInviteDialogOpen(false);
+
+        setCreatedInvitation(
+          null
+        );
+
+        setRoleTarget(
+          null
+        );
+      }
+    },
+    [
+      canManageUsers,
     ]
   );
 
@@ -617,6 +743,49 @@ export default function UsersPage() {
     );
 
 
+  const currentMembership =
+    useMemo(
+      () =>
+        memberships.find(
+          (membership) =>
+            membership.user.id ===
+            user?.id
+        ) || null,
+      [
+        memberships,
+        user?.id,
+      ]
+    );
+
+
+  const canManageTenantOwners =
+    Boolean(
+      currentMembership &&
+      currentMembership.status ===
+        "active" &&
+      hasTenantOwnerRole(
+        currentMembership.roles
+      )
+    );
+
+
+  const assignableRoles =
+    useMemo(
+      () =>
+        canManageTenantOwners
+          ? roles
+          : roles.filter(
+              (role) =>
+                role.code !==
+                "tenant_owner"
+            ),
+      [
+        roles,
+        canManageTenantOwners,
+      ]
+    );
+
+
   const openAddDialog =
     () => {
       const defaultRole =
@@ -659,6 +828,18 @@ export default function UsersPage() {
       ) {
         setDialogError(
           "Select at least one tenant role."
+        );
+        return;
+      }
+
+      if (
+        addRoleCodes.includes(
+          "tenant_owner"
+        ) &&
+        !canManageTenantOwners
+      ) {
+        setDialogError(
+          "Only a Tenant Owner can assign Tenant Owner access."
         );
         return;
       }
@@ -743,6 +924,18 @@ export default function UsersPage() {
       ) {
         setInviteDialogError(
           "Select at least one tenant role."
+        );
+        return;
+      }
+
+      if (
+        inviteRoleCodes.includes(
+          "tenant_owner"
+        ) &&
+        !canManageTenantOwners
+      ) {
+        setInviteDialogError(
+          "Only a Tenant Owner can invite another Tenant Owner."
         );
         return;
       }
@@ -1002,6 +1195,18 @@ export default function UsersPage() {
       membership:
         TenantUserMembership
     ) => {
+      if (
+        hasTenantOwnerRole(
+          membership.roles
+        ) &&
+        !canManageTenantOwners
+      ) {
+        setError(
+          "Only a Tenant Owner can modify Tenant Owner access."
+        );
+        return;
+      }
+
       setRoleTarget(
         membership
       );
@@ -1032,6 +1237,23 @@ export default function UsersPage() {
       ) {
         setDialogError(
           "Select at least one tenant role."
+        );
+        return;
+      }
+
+      if (
+        (
+          hasTenantOwnerRole(
+            roleTarget.roles
+          ) ||
+          editRoleCodes.includes(
+            "tenant_owner"
+          )
+        ) &&
+        !canManageTenantOwners
+      ) {
+        setDialogError(
+          "Only a Tenant Owner can modify Tenant Owner access."
         );
         return;
       }
@@ -1084,6 +1306,18 @@ export default function UsersPage() {
         | "revoke"
     ) => {
       if (!selectedTenantId) {
+        return;
+      }
+
+      if (
+        hasTenantOwnerRole(
+          membership.roles
+        ) &&
+        !canManageTenantOwners
+      ) {
+        setError(
+          "Only a Tenant Owner can change another Tenant Owner's membership status."
+        );
         return;
       }
 
@@ -1168,8 +1402,12 @@ export default function UsersPage() {
 
 
   return (
-    <ProtectedRoute>
-      <AppShell>
+  <ProtectedRoute>
+    <AppShell>
+      <PermissionGuard
+        scope="tenant"
+        permission="tenant.users.view"
+      >
         <Box>
 
           <Box
@@ -1243,6 +1481,9 @@ export default function UsersPage() {
                 Refresh
               </Button>
 
+
+ {canManageUsers && (
+                <>
               <Button
                 variant="outlined"
                 startIcon={
@@ -1278,6 +1519,8 @@ export default function UsersPage() {
               >
                 Add Existing User
               </Button>
+                </>
+              )}      
             </Stack>
           </Box>
 
@@ -1677,6 +1920,12 @@ export default function UsersPage() {
                           activeOwnerCount ===
                             1;
 
+                        const protectedFromCurrentActor =
+                          hasTenantOwnerRole(
+                            membership.roles
+                          ) &&
+                          !canManageTenantOwners;
+
                         return (
                           <TableRow
                             key={
@@ -1804,112 +2053,124 @@ export default function UsersPage() {
                             <TableCell
                               align="right"
                             >
-                              <Stack
-                                direction="row"
-                                spacing={0.75}
-                                sx={{
-                                  justifyContent:
-                                    "flex-end",
-                                }}
-                              >
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  startIcon={
-                                    <ManageAccountsOutlined />
-                                  }
-                                  disabled={
-                                    isBusy ||
+                                                            {canManageUsers && !protectedFromCurrentActor ? (
+                                <Stack
+                                  direction="row"
+                                  spacing={0.75}
+                                  sx={{
+                                    justifyContent:
+                                      "flex-end",
+                                  }}
+                                >
+                                  <Button
+                                    size="small"
+                                    variant="outlined"
+                                    startIcon={
+                                      <ManageAccountsOutlined />
+                                    }
+                                    disabled={
+                                      isBusy ||
+                                      membership.status ===
+                                        "revoked"
+                                    }
+                                    onClick={
+                                      () =>
+                                        openRoleDialog(
+                                          membership
+                                        )
+                                    }
+                                  >
+                                    Roles
+                                  </Button>
+
+                                  {membership.status ===
+                                    "active" && (
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      color="warning"
+                                      startIcon={
+                                        <PauseCircleOutlineOutlined />
+                                      }
+                                      disabled={
+                                        isBusy ||
+                                        isLastActiveOwner
+                                      }
+                                      onClick={
+                                        () =>
+                                          runMembershipAction(
+                                            membership,
+                                            "suspend"
+                                          )
+                                      }
+                                    >
+                                      Suspend
+                                    </Button>
+                                  )}
+
+                                  {(
+                                    membership.status ===
+                                      "suspended" ||
                                     membership.status ===
                                       "revoked"
-                                  }
-                                  onClick={
-                                    () =>
-                                      openRoleDialog(
-                                        membership
-                                      )
-                                  }
+                                  ) && (
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      startIcon={
+                                        <PlayCircleOutlineOutlined />
+                                      }
+                                      disabled={
+                                        isBusy
+                                      }
+                                      onClick={
+                                        () =>
+                                          runMembershipAction(
+                                            membership,
+                                            "activate"
+                                          )
+                                      }
+                                    >
+                                      Activate
+                                    </Button>
+                                  )}
+
+                                  {membership.status !==
+                                    "revoked" && (
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      color="error"
+                                      startIcon={
+                                        <BlockOutlined />
+                                      }
+                                      disabled={
+                                        isBusy ||
+                                        isLastActiveOwner
+                                      }
+                                      onClick={
+                                        () =>
+                                          runMembershipAction(
+                                            membership,
+                                            "revoke"
+                                          )
+                                      }
+                                    >
+                                      Revoke
+                                    </Button>
+                                  )}
+                                </Stack>
+                              ) : (
+                                <Typography
+                                  sx={{
+                                    fontSize: 11,
+                                    color:
+                                      "text.secondary",
+                                  }}
                                 >
-                                  Roles
-                                </Button>
-
-                                {membership.status ===
-                                  "active" && (
-                                  <Button
-                                    size="small"
-                                    variant="outlined"
-                                    color="warning"
-                                    startIcon={
-                                      <PauseCircleOutlineOutlined />
-                                    }
-                                    disabled={
-                                      isBusy ||
-                                      isLastActiveOwner
-                                    }
-                                    onClick={
-                                      () =>
-                                        runMembershipAction(
-                                          membership,
-                                          "suspend"
-                                        )
-                                    }
-                                  >
-                                    Suspend
-                                  </Button>
-                                )}
-
-                                {(
-                                  membership.status ===
-                                    "suspended" ||
-                                  membership.status ===
-                                    "revoked"
-                                ) && (
-                                  <Button
-                                    size="small"
-                                    variant="outlined"
-                                    startIcon={
-                                      <PlayCircleOutlineOutlined />
-                                    }
-                                    disabled={
-                                      isBusy
-                                    }
-                                    onClick={
-                                      () =>
-                                        runMembershipAction(
-                                          membership,
-                                          "activate"
-                                        )
-                                    }
-                                  >
-                                    Activate
-                                  </Button>
-                                )}
-
-                                {membership.status !==
-                                  "revoked" && (
-                                  <Button
-                                    size="small"
-                                    variant="outlined"
-                                    color="error"
-                                    startIcon={
-                                      <BlockOutlined />
-                                    }
-                                    disabled={
-                                      isBusy ||
-                                      isLastActiveOwner
-                                    }
-                                    onClick={
-                                      () =>
-                                        runMembershipAction(
-                                          membership,
-                                          "revoke"
-                                        )
-                                    }
-                                  >
-                                    Revoke
-                                  </Button>
-                                )}
-                              </Stack>
+                                  —
+                                </Typography>
+                              )}
                             </TableCell>
                           </TableRow>
                         );
@@ -1937,9 +2198,10 @@ export default function UsersPage() {
           ) : null}
 
 
-          {!loading &&
-            selectedTenantId &&
-            !error && (
+          {canManageUsers &&
+          !loading &&
+          selectedTenantId &&
+          !error && (
             <Box
               sx={{
                 mt: 3,
@@ -2092,15 +2354,25 @@ export default function UsersPage() {
                             busyInvitationId ===
                             invitation.invitationId;
 
+                          const protectedInvitation =
+                            hasTenantOwnerRole(
+                              invitation.roles
+                            ) &&
+                            !canManageTenantOwners;
+
                           const canReissue =
-                            effectiveStatus ===
-                              "pending" ||
-                            effectiveStatus ===
-                              "expired";
+                            !protectedInvitation &&
+                            (
+                              effectiveStatus ===
+                                "pending" ||
+                              effectiveStatus ===
+                                "expired"
+                            );
 
                           const canRevoke =
+                            !protectedInvitation &&
                             effectiveStatus ===
-                            "pending";
+                              "pending";
 
                           return (
                             <TableRow
@@ -2436,7 +2708,7 @@ export default function UsersPage() {
                       }
                     }
                   >
-                    {roles.map(
+                    {assignableRoles.map(
                       (role) => (
                         <MenuItem
                           key={
@@ -2770,7 +3042,7 @@ export default function UsersPage() {
                     }
                   >
                     {
-                      roles.map(
+                      assignableRoles.map(
                         (role) => (
                           <MenuItem
                             key={
@@ -2946,7 +3218,7 @@ export default function UsersPage() {
                   }
                 >
                   {
-                    roles.map(
+                    assignableRoles.map(
                       (role) => (
                         <MenuItem
                           key={
@@ -3034,9 +3306,10 @@ export default function UsersPage() {
             </DialogActions>
           </Dialog>
 
-        </Box>
-      </AppShell>
-    </ProtectedRoute>
+                </Box>
+      </PermissionGuard>
+    </AppShell>
+  </ProtectedRoute>
   );
 }
 

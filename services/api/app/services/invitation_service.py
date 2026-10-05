@@ -11,6 +11,10 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from services.api.app.core.rbac_catalog import (
+    role_is_protected,
+)
+
 from services.api.app.models.iam import (
     Role,
     TenantInvitation,
@@ -23,6 +27,10 @@ from services.api.app.models.platform import Tenant
 from services.api.app.services.auth_service import (
     hash_password,
     normalize_email,
+)
+from services.api.app.services.authorization_service import (
+    AuthorizationError,
+    require_protected_tenant_role_manager,
 )
 
 
@@ -249,6 +257,45 @@ def _load_tenant_roles(
     ]
 
 
+
+def _roles_include_protected_tenant_role(
+    roles: list[Role],
+) -> bool:
+
+    return any(
+        role_is_protected(
+            "tenant",
+            role.code,
+        )
+        for role in roles
+    )
+
+
+def _require_actor_can_manage_invited_roles(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    roles: list[Role],
+) -> None:
+
+    if not _roles_include_protected_tenant_role(
+        roles
+    ):
+        return
+
+    try:
+        require_protected_tenant_role_manager(
+            db=db,
+            user_id=actor_user_id,
+            tenant_id=tenant_id,
+        )
+
+    except AuthorizationError as error:
+        raise InvitationForbidden(
+            str(error)
+        ) from error
+
 def _expire_old_pending_invitation(
     db: Session,
     *,
@@ -300,6 +347,13 @@ def create_tenant_invitation(
     roles = _load_tenant_roles(
         db,
         role_codes
+    )
+
+    _require_actor_can_manage_invited_roles(
+        db=db,
+        tenant_id=tenant_id,
+        actor_user_id=invited_by_user_id,
+        roles=roles,
     )
 
     _expire_old_pending_invitation(
@@ -454,6 +508,7 @@ def reissue_tenant_invitation(
     *,
     tenant_id: uuid.UUID,
     invitation_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
     expiry_hours: int,
 ) -> InvitationCreationResult:
     """
@@ -509,6 +564,18 @@ def reissue_tenant_invitation(
         raise InvitationConflict(
             "This invitation cannot be reissued."
         )
+
+    roles = get_invitation_roles(
+        db,
+        invitation.id,
+    )
+
+    _require_actor_can_manage_invited_roles(
+        db=db,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        roles=roles,
+    )
 
     # Re-check whether the invited email has meanwhile
     # become an active tenant member through another path.
@@ -613,6 +680,7 @@ def revoke_tenant_invitation(
     *,
     tenant_id: uuid.UUID,
     invitation_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
 ) -> TenantInvitation:
     invitation = get_tenant_invitation(
         db,
@@ -640,6 +708,18 @@ def revoke_tenant_invitation(
         raise InvitationConflict(
             "This invitation is already revoked."
         )
+
+    roles = get_invitation_roles(
+        db,
+        invitation.id,
+    )
+
+    _require_actor_can_manage_invited_roles(
+        db=db,
+        tenant_id=tenant_id,
+        actor_user_id=actor_user_id,
+        roles=roles,
+    )
 
     invitation.status = "revoked"
     invitation.revoked_at = (

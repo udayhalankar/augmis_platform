@@ -961,6 +961,12 @@ def revoke_invitation(
 
                 ),
 
+                actor_user_id=(
+
+                    current_user.id
+
+                ),
+
             )
 
         )
@@ -1112,6 +1118,12 @@ def reissue_invitation(
                 invitation_id=(
 
                     invitation_id
+
+                ),
+
+                actor_user_id=(
+
+                    current_user.id
 
                 ),
 

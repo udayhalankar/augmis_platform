@@ -8,6 +8,10 @@ from sqlalchemy import select
 
 from sqlalchemy.orm import Session
 
+from services.api.app.core.rbac_catalog import (
+    role_is_protected,
+)
+
 from services.api.app.models.iam import (
     Permission,
     PublisherMembership,
@@ -211,6 +215,78 @@ def get_platform_permissions(
 
 
 # ============================================================
+# PROTECTED OWNERSHIP ROLE RESOLUTION
+# ============================================================
+
+
+def tenant_membership_has_protected_role(
+    db: Session,
+    membership_id: uuid.UUID,
+) -> bool:
+
+    role_codes = list(
+        db.scalars(
+            select(
+                Role.code
+            )
+            .join(
+                TenantMembershipRole,
+                TenantMembershipRole.role_id
+                == Role.id,
+            )
+            .where(
+                TenantMembershipRole.membership_id
+                == membership_id,
+
+                Role.scope_type
+                == "tenant",
+            )
+        )
+    )
+
+    return any(
+        role_is_protected(
+            "tenant",
+            role_code,
+        )
+        for role_code in role_codes
+    )
+
+
+def require_protected_tenant_role_manager(
+    db: Session,
+    user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> TenantMembership:
+
+    membership = (
+        get_tenant_membership(
+            db=db,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+    )
+
+    if not membership:
+        raise AuthorizationError(
+            "You do not belong to this tenant."
+        )
+
+    if not tenant_membership_has_protected_role(
+        db=db,
+        membership_id=membership.id,
+    ):
+        raise AuthorizationError(
+            (
+                "Only an active Tenant Owner can "
+                "manage protected tenant owner access."
+            )
+        )
+
+    return membership
+
+
+# ============================================================
 # PLATFORM AUTHORIZATION
 # ============================================================
 
@@ -395,5 +471,54 @@ def require_publisher_permission(
             )
         )
 
+
+    return membership
+
+def require_any_publisher_permission(
+    db: Session,
+    user: User,
+    publisher_id: uuid.UUID,
+    permission_codes: set[str],
+) -> PublisherMembership:
+
+    membership = (
+        get_publisher_membership(
+            db=db,
+            user_id=user.id,
+            publisher_id=publisher_id
+        )
+    )
+
+    if not membership:
+
+        raise AuthorizationError(
+            "You do not belong to this publisher."
+        )
+
+    permissions = (
+        get_publisher_permissions(
+            db=db,
+            membership_id=membership.id
+        )
+    )
+
+    matching_permissions = (
+        permissions
+        & permission_codes
+    )
+
+    if not matching_permissions:
+
+        raise AuthorizationError(
+            (
+                "Missing publisher permission. "
+                "One of the following is required: "
+                + ", ".join(
+                    sorted(
+                        permission_codes
+                    )
+                )
+            )
+        )
 
     return membership
