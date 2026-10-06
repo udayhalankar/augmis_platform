@@ -1190,11 +1190,23 @@ export default function UsersPage() {
     };
 
 
-  const openRoleDialog =
+   const openRoleDialog =
     (
       membership:
         TenantUserMembership
     ) => {
+
+      if (
+        membership.user.id ===
+        user?.id
+      ) {
+        setError(
+          "You cannot change your own tenant roles. Another authorized tenant administrator must perform this change."
+        );
+
+        return;
+      }
+
       if (
         hasTenantOwnerRole(
           membership.roles
@@ -1305,7 +1317,22 @@ export default function UsersPage() {
         | "activate"
         | "revoke"
     ) => {
-      if (!selectedTenantId) {
+            if (!selectedTenantId) {
+        return;
+      }
+
+      if (
+        membership.user.id ===
+          user?.id &&
+        (
+          action === "suspend" ||
+          action === "revoke"
+        )
+      ) {
+        setError(
+          "You cannot suspend or revoke your own tenant membership. Another authorized tenant administrator must perform this change."
+        );
+
         return;
       }
 
@@ -1903,8 +1930,12 @@ export default function UsersPage() {
                     filteredMemberships.map(
                       (membership) => {
                         const isBusy =
-                          busyMembershipId ===
-                          membership.membershipId;
+                            busyMembershipId ===
+                            membership.membershipId;
+
+                        const isCurrentUser =
+                            membership.user.id ===
+                            user?.id;
 
                         const isActiveOwner =
                           membership.status ===
@@ -2069,10 +2100,11 @@ export default function UsersPage() {
                                       <ManageAccountsOutlined />
                                     }
                                     disabled={
-                                      isBusy ||
-                                      membership.status ===
-                                        "revoked"
-                                    }
+                                          isBusy ||
+                                          isCurrentUser ||
+                                          membership.status ===
+                                            "revoked"
+                                        }
                                     onClick={
                                       () =>
                                         openRoleDialog(
@@ -2093,9 +2125,10 @@ export default function UsersPage() {
                                         <PauseCircleOutlineOutlined />
                                       }
                                       disabled={
-                                        isBusy ||
-                                        isLastActiveOwner
-                                      }
+                                          isBusy ||
+                                          isCurrentUser ||
+                                          isLastActiveOwner
+                                        }
                                       onClick={
                                         () =>
                                           runMembershipAction(
@@ -2145,9 +2178,10 @@ export default function UsersPage() {
                                         <BlockOutlined />
                                       }
                                       disabled={
-                                        isBusy ||
-                                        isLastActiveOwner
-                                      }
+                                            isBusy ||
+                                            isCurrentUser ||
+                                            isLastActiveOwner
+                                          }
                                       onClick={
                                         () =>
                                           runMembershipAction(

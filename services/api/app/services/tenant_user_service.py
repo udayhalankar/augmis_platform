@@ -18,6 +18,10 @@ from services.api.app.models.iam import (
     User,
 )
 
+from services.api.app.models.platform import (
+    Tenant,
+)
+
 from services.api.app.services.audit_service import (
     record_audit_event,
 )
@@ -380,6 +384,72 @@ def _require_actor_can_manage_protected_tenant_roles(
             status_code=403,
         ) from error
 
+def _tenant_has_active_owner(
+    db: Session,
+    tenant_id: uuid.UUID,
+) -> bool:
+
+    owner_membership_id = db.scalar(
+        select(
+            TenantMembership.id
+        )
+        .join(
+            TenantMembershipRole,
+            TenantMembershipRole.membership_id
+            == TenantMembership.id,
+        )
+        .join(
+            Role,
+            Role.id
+            == TenantMembershipRole.role_id,
+        )
+        .where(
+            TenantMembership.tenant_id
+            == tenant_id,
+
+            TenantMembership.status
+            == "active",
+
+            Role.scope_type
+            == "tenant",
+
+            Role.code
+            == "tenant_owner",
+        )
+        .limit(
+            1
+        )
+    )
+
+    return (
+        owner_membership_id
+        is not None
+    )
+
+def _lock_tenant_for_owner_mutation(
+    db: Session,
+    tenant_id: uuid.UUID,
+) -> None:
+
+    tenant = db.scalar(
+        select(
+            Tenant
+        )
+        .where(
+            Tenant.id
+            == tenant_id
+        )
+        .with_for_update()
+    )
+
+    if not tenant:
+
+        raise TenantUserServiceError(
+            "Tenant not found.",
+            status_code=404,
+        )
+
+
 def _has_other_active_owner(
     db: Session,
     tenant_id: uuid.UUID,
@@ -679,6 +749,260 @@ def add_existing_user_to_tenant(
         user=user,
     )
 
+def recover_orphan_tenant_owner(
+    db: Session,
+    *,
+    tenant_id: uuid.UUID,
+    actor_user_id: uuid.UUID,
+    email: str,
+) -> dict:
+
+    # Lock the tenant row so two simultaneous recovery
+    # requests cannot both pass the orphan check.
+    tenant = db.scalar(
+        select(
+            Tenant
+        )
+        .where(
+            Tenant.id
+            == tenant_id
+        )
+        .with_for_update()
+    )
+
+    if not tenant:
+
+        raise TenantUserServiceError(
+            "Tenant not found.",
+            status_code=404,
+        )
+
+    if (
+        tenant.status
+        != "active"
+    ):
+
+        raise TenantUserServiceError(
+            (
+                "Tenant Owner recovery is only "
+                "allowed for an active tenant."
+            ),
+            status_code=409,
+        )
+
+    # This recovery path MUST only work while the
+    # tenant is genuinely orphaned.
+    if _tenant_has_active_owner(
+        db=db,
+        tenant_id=tenant_id,
+    ):
+
+        raise TenantUserServiceError(
+            (
+                "Tenant already has an active "
+                "Tenant Owner. Use normal tenant "
+                "administration instead."
+            ),
+            status_code=409,
+        )
+
+    normalized_email = (
+        normalize_email(
+            email
+        )
+    )
+
+    user = db.scalar(
+        select(
+            User
+        )
+        .where(
+            User.email_normalized
+            == normalized_email,
+        )
+    )
+
+    if not user:
+
+        raise TenantUserServiceError(
+            (
+                "No AUGMIS user is registered "
+                "with this email address."
+            ),
+            status_code=404,
+        )
+
+    if (
+        user.status
+        != "active"
+    ):
+
+        raise TenantUserServiceError(
+            "The AUGMIS user account is not active.",
+            status_code=409,
+        )
+
+    owner_role = db.scalar(
+        select(
+            Role
+        )
+        .where(
+            Role.scope_type
+            == "tenant",
+
+            Role.code
+            == "tenant_owner",
+        )
+    )
+
+    if not owner_role:
+
+        raise TenantUserServiceError(
+            (
+                "Tenant Owner role is not configured. "
+                "Run the RBAC seed before recovery."
+            ),
+            status_code=500,
+        )
+
+    membership = db.scalar(
+        select(
+            TenantMembership
+        )
+        .where(
+            TenantMembership.tenant_id
+            == tenant_id,
+
+            TenantMembership.user_id
+            == user.id,
+        )
+    )
+
+    membership_created = (
+        membership
+        is None
+    )
+
+    previous_status = (
+        membership.status
+        if membership
+        else None
+    )
+
+    # If the target user has never belonged to the tenant,
+    # create the membership.
+    if not membership:
+
+        membership = TenantMembership(
+            tenant_id=tenant_id,
+            user_id=user.id,
+            status="active",
+        )
+
+        db.add(
+            membership
+        )
+
+        db.flush()
+
+    previous_roles = (
+        _membership_roles(
+            db=db,
+            membership_id=membership.id,
+        )
+    )
+
+    previous_codes = {
+        role.code
+        for role in previous_roles
+    }
+
+    # Recovery explicitly restores active membership.
+    membership.status = (
+        "active"
+    )
+
+    # Preserve every existing role and add Tenant Owner.
+    if (
+        "tenant_owner"
+        not in previous_codes
+    ):
+
+        db.add(
+            TenantMembershipRole(
+                membership_id=membership.id,
+                role_id=owner_role.id,
+            )
+        )
+
+    db.flush()
+
+    final_roles = (
+        _membership_roles(
+            db=db,
+            membership_id=membership.id,
+        )
+    )
+
+    final_codes = {
+        role.code
+        for role in final_roles
+    }
+
+    record_audit_event(
+        db,
+        action="platform.tenant.owner.recover",
+        resource_type="tenant_membership",
+        resource_id=membership.id,
+        actor_user_id=actor_user_id,
+        tenant_id=tenant_id,
+        outcome="success",
+        message=(
+            "Recovered Tenant Owner access for "
+            f"{user.email}."
+        ),
+        metadata={
+            "recoveryType":
+                "orphan_owner",
+
+            "targetUserId":
+                str(user.id),
+
+            "targetEmail":
+                user.email,
+
+            "membershipCreated":
+                membership_created,
+
+            "previousMembershipStatus":
+                previous_status,
+
+            "status":
+                membership.status,
+
+            "previousRoleCodes":
+                sorted(
+                    previous_codes
+                ),
+
+            "roleCodes":
+                sorted(
+                    final_codes
+                ),
+        },
+    )
+
+    db.commit()
+
+    db.refresh(
+        membership
+    )
+
+    return _membership_payload(
+        db=db,
+        membership=membership,
+        user=user,
+    )
 
 def replace_membership_roles(
     db: Session,
@@ -738,6 +1062,12 @@ def replace_membership_roles(
             new_roles
         )
     ):
+
+        _lock_tenant_for_owner_mutation(
+            db=db,
+            tenant_id=tenant_id,
+        )
+
         _require_actor_can_manage_protected_tenant_roles(
             db=db,
             tenant_id=tenant_id,
@@ -753,6 +1083,34 @@ def replace_membership_roles(
         role.code
         for role in new_roles
     }
+
+    # --------------------------------------------------------
+    # SELF-LOCKOUT PROTECTION
+    # --------------------------------------------------------
+    #
+    # A tenant administrator must not change their own
+    # tenant roles. Another authorized administrator must
+    # perform the change.
+    #
+    # This prevents accidental loss of tenant administration
+    # access even when another Tenant Owner exists.
+    # --------------------------------------------------------
+
+    if (
+        membership.user_id
+        == actor_user_id
+        and previous_codes
+        != new_codes
+    ):
+
+        raise TenantUserServiceError(
+            (
+                "You cannot change your own tenant roles. "
+                "Another authorized tenant administrator "
+                "must perform this change."
+            ),
+            status_code=409,
+        )
 
     if (
         "tenant_owner"
@@ -888,10 +1246,39 @@ def set_membership_status(
             user=user,
         )
 
-    if _membership_has_protected_tenant_role(
+    # --------------------------------------------------------
+    # SELF-LOCKOUT PROTECTION
+    # --------------------------------------------------------
+
+    if (
+        membership.user_id
+        == actor_user_id
+        and new_status in {
+            "suspended",
+            "revoked",
+        }
+    ):
+
+        raise TenantUserServiceError(
+            (
+                "You cannot suspend or revoke your own "
+                "tenant membership. Another authorized "
+                "tenant administrator must perform "
+                "this change."
+            ),
+            status_code=409,
+        )
+
+        if _membership_has_protected_tenant_role(
         db=db,
         membership_id=membership.id,
-    ):
+        ):
+
+            _lock_tenant_for_owner_mutation(
+                db=db,
+                tenant_id=tenant_id,
+            )
+
         _require_actor_can_manage_protected_tenant_roles(
             db=db,
             tenant_id=tenant_id,

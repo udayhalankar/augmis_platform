@@ -27,6 +27,7 @@ from services.api.app.models.platform import (
 )
 
 from services.api.app.schemas.tenant_user import (
+    TenantOwnerRecoveryRequest,
     TenantRoleResponse,
     TenantUserAddRequest,
     TenantUserMembershipResponse,
@@ -36,6 +37,7 @@ from services.api.app.schemas.tenant_user import (
 from services.api.app.services.authorization_service import (
     AuthorizationError,
     require_any_tenant_permission,
+    require_platform_permission,
     require_tenant_permission,
 )
 
@@ -44,6 +46,7 @@ from services.api.app.services.tenant_user_service import (
     add_existing_user_to_tenant,
     list_tenant_roles,
     list_tenant_users,
+    recover_orphan_tenant_owner,
     replace_membership_roles,
     set_membership_status,
 )
@@ -318,6 +321,68 @@ def add_tenant_user(
             error
         )
 
+# ============================================================
+# PLATFORM ORPHAN-OWNER RECOVERY
+# ============================================================
+
+
+@router.post(
+    "/{tenant_id}/owner-recovery",
+    response_model=(
+        TenantUserMembershipResponse
+    ),
+)
+def recover_tenant_owner(
+    tenant_id: uuid.UUID,
+
+    payload: TenantOwnerRecoveryRequest,
+
+    db: Session = Depends(
+        get_db
+    ),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
+):
+
+    try:
+
+        require_platform_permission(
+            db=db,
+            user=current_user,
+            permission_code=(
+                "platform.rbac.manage"
+            ),
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
+
+    try:
+
+        return recover_orphan_tenant_owner(
+            db=db,
+            tenant_id=tenant_id,
+            actor_user_id=(
+                current_user.id
+            ),
+            email=str(
+                payload.email
+            ),
+        )
+
+    except TenantUserServiceError as error:
+
+        db.rollback()
+
+        _raise_service_error(
+            error
+        )
 
 # ============================================================
 # REPLACE MEMBERSHIP ROLES

@@ -26,6 +26,7 @@ from services.api.app.core.auth import (
 )
 
 from services.api.app.models.iam import (
+    PublisherMembership,
     User
 )
 
@@ -1258,12 +1259,56 @@ def upload_static_application(
     "/applications"
 )
 def list_applications(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
+
+    memberships = list(
+        db.scalars(
+            select(PublisherMembership)
+            .where(
+                PublisherMembership.user_id
+                == current_user.id,
+
+                PublisherMembership.status
+                == "active",
+            )
+        )
+    )
+
+    authorized_publisher_ids = []
+
+    for membership in memberships:
+
+        try:
+            require_publisher_permission(
+                db=db,
+                user=current_user,
+                publisher_id=membership.publisher_id,
+                permission_code="application.manage",
+            )
+
+        except AuthorizationError:
+            continue
+
+        authorized_publisher_ids.append(
+            membership.publisher_id
+        )
+
+    if not authorized_publisher_ids:
+        return []
 
     applications = list(
         db.scalars(
             select(Application)
+            .where(
+                Application.publisher_id.in_(
+                    authorized_publisher_ids
+                )
+            )
             .order_by(
                 Application.created_at.desc()
             )
@@ -1608,7 +1653,12 @@ def build_application_package(
 )
 def get_build(
     build_id: uuid.UUID,
-    db: Session = Depends(get_db)
+
+    db: Session = Depends(get_db),
+
+    current_user: User = Depends(
+        get_current_user
+    ),
 ):
 
     build = db.get(
@@ -1622,6 +1672,52 @@ def get_build(
             status_code=404,
             detail="Build not found"
         )
+
+    version = db.get(
+        ApplicationVersion,
+        build.application_version_id
+    )
+
+    if not version:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Build references a missing "
+                "application version."
+            )
+        )
+
+    application = db.get(
+        Application,
+        version.application_id
+    )
+
+    if not application:
+
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Application version references "
+                "a missing application."
+            )
+        )
+
+    try:
+
+        require_publisher_permission(
+            db=db,
+            user=current_user,
+            publisher_id=application.publisher_id,
+            permission_code="application.manage",
+        )
+
+    except AuthorizationError as error:
+
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
 
     return {
 

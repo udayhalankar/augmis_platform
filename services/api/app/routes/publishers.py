@@ -29,6 +29,11 @@ from services.api.app.schemas.publisher import (
     PublisherResponse
 )
 
+from services.api.app.services.authorization_service import (
+    AuthorizationError,
+    require_platform_permission,
+)
+
 from services.api.app.services.membership_service import (
     MembershipSetupError,
     create_publisher_owner_membership
@@ -55,6 +60,19 @@ def create_publisher(
         get_current_user
     )
 ):
+
+    try:
+        require_platform_permission(
+            db=db,
+            user=current_user,
+            permission_code="platform.publishers.manage",
+        )
+
+    except AuthorizationError as error:
+        raise HTTPException(
+            status_code=403,
+            detail=str(error),
+        ) from error
 
     existing = db.scalar(
         select(Publisher)

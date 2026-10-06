@@ -83,9 +83,11 @@ def platform_readiness():
 
         database_ready = True
 
-    except Exception as error:
+    except Exception:
 
-        database_error = str(error)
+        database_error = (
+            "Database readiness check failed."
+        )
 
     finally:
 
@@ -105,9 +107,11 @@ def platform_readiness():
                 "Docker runtime is unavailable."
             )
 
-    except Exception as error:
+    except Exception:
 
-        docker_error = str(error)
+        docker_error = (
+            "Docker readiness check failed."
+        )
 
     ready = (
         database_ready

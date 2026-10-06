@@ -39,6 +39,7 @@ PERMISSION_DEFINITIONS = {
             "platform",
     },
 
+
     "platform.rbac.manage": {
         "name":
             "Manage platform RBAC",
@@ -47,10 +48,25 @@ PERMISSION_DEFINITIONS = {
             "platform",
     },
 
+    "platform.tenants.manage": {
+        "name":
+            "Manage platform tenants",
+
+        "scope_type":
+            "platform",
+    },
+
+    "platform.publishers.manage": {
+        "name":
+            "Manage platform publishers",
+
+        "scope_type":
+            "platform",
+    },
+
 
     # --------------------------------------------------------
     # TENANT SCOPE
-    # --------------------------------------------------------
 
     "tenant.manage": {
         "name":
@@ -213,6 +229,8 @@ ROLE_BLUEPRINTS = {
         "permissions": [
             "platform.settings.manage",
             "platform.rbac.manage",
+            "platform.tenants.manage",
+            "platform.publishers.manage",
         ],
     },
 

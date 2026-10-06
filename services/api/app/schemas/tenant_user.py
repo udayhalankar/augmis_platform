@@ -24,6 +24,10 @@ class TenantUserAddRequest(BaseModel):
         populate_by_name=True,
     )
 
+class TenantOwnerRecoveryRequest(BaseModel):
+
+    email: EmailStr
+
 
 class TenantUserRoleUpdateRequest(BaseModel):
 

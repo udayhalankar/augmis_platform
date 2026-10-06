@@ -1,56 +1,120 @@
 # AUGMIS Project State
 
-_Last updated: 2026-10-04_
+_Last updated: 2026-10-06_
 
 ## Current focus
-Phase 4 — Tenant Users & RBAC Administration
 
-## Recently completed
-- Invitation create/list/revoke/reissue
-- New-user and existing-user invitation acceptance
-- Invitation acceptance security checks
-- `/users` tenant member and invitation administration
-- Tenant membership suspend/activate/revoke
-- Last-active Tenant Owner protection
-- Platform email settings UI and encrypted credential storage
-- Resend SMTP delivery
-- Resend webhook verification and event persistence
-- Real invitation delivery states including Submitted, Delivered and Delayed
-- Audit events for invitation and email-delivery lifecycle
+Phase 4 — Tenant Users & RBAC Administration: COMPLETE
+
+Next:
+Phase 5 — Audit & Governance
+
+## Phase 4 completion summary
+
+Implemented and verified:
+
+- Tenant member listing and administration
+- Add existing AUGMIS users
+- Tenant membership activate / suspend / revoke
+- Tenant role assignment
+- Tenant invitation create / list / revoke / reissue
+- Existing-user and new-account invitation acceptance
+- Invitation wrong-account / expired / revoked protections
+- Invitation email delivery
+- DB-backed encrypted SMTP configuration
+- Resend webhook verification and delivery-event persistence
+- Canonical permission catalogue
+- Platform / tenant / publisher role catalogue
+- Platform RBAC administration API
+- Role-permission administration
+- `/settings/rbac`
+- Current-user platform and tenant permission APIs
+- Permission-aware administrative pages/actions
+- Tenant view/manage permission split
+- Protected Platform Owner / Tenant Owner / Publisher Owner roles
+- Tenant Admin cannot assign or invite Tenant Owner
+- Last-active-Tenant-Owner protection
+- Tenant Owner self-demotion / self-suspend / self-revoke protection
+- Tenant-owner mutation row locking
+- Controlled orphan Tenant Owner recovery
+- Platform / Publisher / Tenant administrative boundary hardening
+- Route-by-route authorization audit
+- Application/build route authorization hardening
+- Platform-controlled tenant/publisher creation
+- Public readiness error sanitization
+- Full RBAC behavioral matrix verification
+
+## Phase 4 application-access decision
+
+AUGMIS does not introduce a separate per-user application ACL in Phase 4.
+
+Application access is governed by:
+
+1. tenant membership,
+2. effective tenant role permissions,
+3. subscription state,
+4. subscription entitlements,
+5. application/deployment/runtime-specific permission checks.
+
+This avoids a parallel authorization system while preserving backend-authoritative access control.
+
+## Phase 4 verification
+
+- Structural RBAC integrity: PASS
+- Behavioral RBAC matrix: PASS — 120 assertions
+- Protected role mutation checks: PASS
+- Tenant self-lockout protection: PASS
+- Last-active-Tenant-Owner protection: PASS
+- Cross-tenant isolation: PASS
+- Cross-publisher isolation: PASS
+- Suspended/revoked tenant membership denial: PASS
+- Suspended/revoked publisher membership denial: PASS
+- Alembic current: `f2a7c4d91e60`
+- Alembic head: `f2a7c4d91e60`
+- Backend compile: PASS
+- Frontend production build: PASS
+- Next.js: 16.3.5
 
 ## Current architecture rules
+
 - Next.js / React / MUI frontend
 - FastAPI control plane
 - PostgreSQL persistence
+- SQLAlchemy + Alembic
 - Backend authorization is authoritative
 - Routes → schemas/services → models/db
 - Reuse `ProtectedRoute` + `AppShell`
 - Reuse global `TenantProvider`
 - Frontend API helpers live under `apps/web/src/lib/`
-- Runtime security is a separate boundary from normal RBAC/UI work
+- Runtime/static-runtime security remains a separate security boundary
+- Do not weaken runtime security as a side effect of control-plane work
 
-## Current Phase-4 gap summary
-- Formal Tenant lifecycle review
-- Administrative role catalogue
-- Permission catalogue UX/API
-- Role-permission assignment
-- Application-level permission model
-- Central frontend permission-awareness
-- Platform / Publisher / Tenant administrative boundary completion
-- Full RBAC audit and automated test matrix
-
-## Repository checkpoint
-Populate after backup:
+## Repository closure
 
 - Repository: `udayhalankar/augmis_platform`
-- Branch:
-- Commit SHA:
-- Tag:
-- Alembic current:
-- Alembic head:
-- Backend compile:
-- Frontend build:
-- Working tree clean:
+- Branch: `main`
+- Pre-closure base: `fd88176eaabbdb6952463332f0bd13bed55ac6f3`
+- Phase-4 closure tag: `phase4-rbac-complete-2026-10-06`
+- Closure commit: resolved by the Phase-4 closure tag
 
 ## Next implementation block
-After repository review, continue at the earliest incomplete Phase-4 dependency rather than adding parallel RBAC structures.
+
+Phase 5 — Audit & Governance
+
+Initial scope:
+
+- Audit administration UX
+- Platform-level audit visibility where appropriate
+- Tenant audit filtering/search
+- Security-event coverage review
+- RBAC and lifecycle mutation audit completeness
+- Audit metadata consistency
+- Export/reporting requirements
+- Retention/governance policy
+- Administrative event taxonomy
+
+Containerized Application Runtime moves to Phase 6.
+
+Phase 6 will include container lifecycle, routing, logs, configuration,
+secrets, quotas, upgrades/rollback and the dedicated Container Sandbox
+security sub-phase.
