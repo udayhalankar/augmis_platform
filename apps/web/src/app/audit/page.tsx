@@ -85,6 +85,8 @@ import {
   loadPlatformAuditFilterOptions,
   loadTenantAuditEvents,
   loadTenantAuditFilterOptions,
+  downloadAuditEvidence,
+  AuditEvidenceFormat,
 } from "@/lib/audit";
 
 
@@ -621,6 +623,39 @@ export default function AuditPage() {
     platformLoading ||
     tenantLoading ||
     tenantContextLoading;
+
+
+  // Step 54: export of *applied* filters, not just the visible page.
+  const [exportBusy, setExportBusy] = useState<AuditEvidenceFormat | null>(null);
+
+  const exportEvidence = async (format: AuditEvidenceFormat) => {
+    if (exportBusy || permissionLoading || scope === "personal") return;
+    if ((scope === "platform" && !canPlatformAudit) ||
+        (scope === "tenant" && (!canTenantAudit || !selectedTenantId))) return;
+
+    setExportBusy(format);
+    setError("");
+    try {
+      const result = await downloadAuditEvidence(
+        scope, selectedTenantId ?? null, toApiFilters(appliedFilters), format,
+      );
+      const blobUrl = URL.createObjectURL(result.blob);
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = blobUrl;
+        anchor.download = `augmis-audit-${scope}-${new Date().toISOString().replace(/[:.]/g, "-")}.${format}`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+      }
+    } catch (exportError) {
+      setError(apiError(exportError, "Audit evidence export failed."));
+    } finally {
+      setExportBusy(null);
+    }
+  };
 
 
   /*
@@ -1392,6 +1427,30 @@ export default function AuditPage() {
               direction="row"
               spacing={1}
             >
+              <Button
+                variant="outlined"
+                disabled={
+                  loading || permissionLoading || scope === "personal" ||
+                  (scope === "platform" && !canPlatformAudit) ||
+                  (scope === "tenant" && (!canTenantAudit || !selectedTenantId)) ||
+                  Boolean(exportBusy)
+                }
+                onClick={() => void exportEvidence("csv")}
+              >
+                {exportBusy === "csv" ? "Preparing CSV..." : "Export CSV"}
+              </Button>
+              <Button
+                variant="outlined"
+                disabled={
+                  loading || permissionLoading || scope === "personal" ||
+                  (scope === "platform" && !canPlatformAudit) ||
+                  (scope === "tenant" && (!canTenantAudit || !selectedTenantId)) ||
+                  Boolean(exportBusy)
+                }
+                onClick={() => void exportEvidence("json")}
+              >
+                {exportBusy === "json" ? "Preparing evidence..." : "Evidence JSON"}
+              </Button>
               <Button
                 variant="outlined"
                 startIcon={

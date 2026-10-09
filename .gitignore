@@ -30,3 +30,6 @@ data/packages/
 
 # Local patch backups
 *.bak
+
+# Phase 5 verification reports
+data/phase5-verification/

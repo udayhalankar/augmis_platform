@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "augmis.phase5.acceptance.v1",
+  "releaseName": "AUGMIS Phase 5 - Audit and Governance",
+  "approver": "",
+  "approvalDate": "",
+  "checks": {
+    "step53fPublisherOwnershipDisposition": "pending",
+    "step54LiveTenantExport": "pending",
+    "step54LivePlatformExport": "pending",
+    "step54UnauthorizedTenantExport403": "pending",
+    "step54UnauthorizedPlatformExport403": "pending",
+    "step54JsonEvidenceChecksum": "pending",
+    "step54CsvEvidenceChecksum": "pending",
+    "step54ExportAuditEvent": "pending",
+    "step55RetentionPolicyReviewed": "pending",
+    "step55NoDeletionAndHoldGapAcknowledged": "pending",
+    "step56RegressionSmokeTests": "pending",
+    "step56DocumentationReviewed": "pending"
+  },
+  "openRisks": [
+    "Legacy Infomentica publisher disposition not yet confirmed",
+    "Audit legal hold enforcement and immutable archive not yet implemented",
+    "Automated retention purge intentionally disabled"
+  ],
+  "notes": "Template only: manual checks are not validated by editing the JSON. Keep supporting evidence offline."
+}

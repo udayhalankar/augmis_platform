@@ -724,3 +724,99 @@ def platform_audit_filter_options(
     return get_audit_filter_options(
         db=db,
     )
+
+
+# ============================================================
+# STEP 54 — AUTHORIZED AUDIT EVIDENCE EXPORT (CSV / JSON)
+# ============================================================
+from typing import Literal as _AuditExportLiteral
+from fastapi import Response as _AuditExportResponse
+from services.api.app.services.audit_export_service import (
+    AuditExportError as _AuditExportError,
+    create_audit_export as _create_audit_export,
+)
+
+
+def _audit_evidence_response(*, db, actor, scope, format_, **filters):
+    try:
+        artifact = _create_audit_export(
+            db=db, actor_user_id=actor.id, scope=scope, format_=format_, **filters,
+        )
+    except _AuditExportError as exc:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    return _AuditExportResponse(
+        content=artifact.content,
+        media_type=artifact.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "X-AUGMIS-Export-SHA256": artifact.sha256,
+            "X-AUGMIS-Export-Count": str(artifact.count),
+        },
+    )
+
+
+@router.post("/audit-events/export", include_in_schema=True)
+def export_tenant_audit_evidence(
+    tenant_id: uuid.UUID,
+    format_: _AuditExportLiteral["csv", "json"] = Query(default="csv", alias="format"),
+    publisher_id: uuid.UUID | None = None,
+    action: str | None = None,
+    action_prefix: str | None = None,
+    category: str | None = None,
+    outcome: str | None = None,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    actor_user_id: uuid.UUID | None = None,
+    search: str | None = None,
+    from_date: datetime | None = Query(default=None, alias="from"),
+    to_date: datetime | None = Query(default=None, alias="to"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    tenant = _require_tenant_audit_access(
+        db=db, current_user=current_user, tenant_id=tenant_id,
+    )
+    return _audit_evidence_response(
+        db=db, actor=current_user, scope="tenant", format_=format_,
+        tenant_scope_id=tenant.id,
+        publisher_id=publisher_id, action=action, action_prefix=action_prefix,
+        category=category, outcome=outcome, resource_type=resource_type,
+        resource_id=resource_id, actor_filter_id=actor_user_id,
+        search=search, from_date=from_date, to_date=to_date,
+    )
+
+
+@router.post("/platform/audit-events/export", include_in_schema=True)
+def export_platform_audit_evidence(
+    format_: _AuditExportLiteral["csv", "json"] = Query(default="csv", alias="format"),
+    tenant_id: uuid.UUID | None = None,
+    publisher_id: uuid.UUID | None = None,
+    action: str | None = None,
+    action_prefix: str | None = None,
+    category: str | None = None,
+    outcome: str | None = None,
+    resource_type: str | None = None,
+    resource_id: str | None = None,
+    actor_user_id: uuid.UUID | None = None,
+    search: str | None = None,
+    from_date: datetime | None = Query(default=None, alias="from"),
+    to_date: datetime | None = Query(default=None, alias="to"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _require_platform_audit_access(db=db, current_user=current_user)
+    return _audit_evidence_response(
+        db=db, actor=current_user, scope="platform", format_=format_,
+        tenant_id=tenant_id, publisher_id=publisher_id,
+        action=action, action_prefix=action_prefix, category=category,
+        outcome=outcome, resource_type=resource_type, resource_id=resource_id,
+        actor_filter_id=actor_user_id, search=search,
+        from_date=from_date, to_date=to_date,
+    )

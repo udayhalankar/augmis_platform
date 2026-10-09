@@ -353,3 +353,41 @@ Promise<AuditFilterOptions> {
 
   return response.data;
 }
+
+
+// Step 54 — Audit evidence exports. Uses the existing configured API client.
+export type AuditEvidenceFormat = "csv" | "json";
+
+export async function downloadAuditEvidence(
+  scope: AuditScopeType,
+  tenantId: string | null,
+  filters: AuditEventFilters,
+  format: AuditEvidenceFormat,
+): Promise<{ blob: Blob; sha256: string | null; count: number | null }> {
+  // Personal audit export is deliberately unsupported until a dedicated,
+  // server-authorized personal export endpoint is implemented.
+  if (scope !== "tenant" && scope !== "platform") {
+    throw new Error("Choose Tenant or Platform scope to export audit evidence.");
+  }
+  if (scope === "tenant" && !tenantId) {
+    throw new Error("Select a tenant before exporting audit evidence.");
+  }
+  const endpoint = scope === "platform"
+    ? "/api/v1/platform/audit-events/export"
+    : "/api/v1/audit-events/export";
+  const params = {
+    ...buildAuditParams({ ...filters, limit: undefined, offset: undefined }),
+    ...(scope === "tenant" ? { tenant_id: tenantId } : {}),
+    format,
+  };
+  const response = await api.post<Blob>(endpoint, null, {
+    params,
+    responseType: "blob",
+  });
+  const countRaw = response.headers["x-augmis-export-count"];
+  return {
+    blob: response.data,
+    sha256: response.headers["x-augmis-export-sha256"] ?? null,
+    count: countRaw != null ? Number(countRaw) : null,
+  };
+}

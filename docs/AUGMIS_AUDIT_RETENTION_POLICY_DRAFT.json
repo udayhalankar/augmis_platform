@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "augmis.audit.retention.v1",
+  "status": "draft_unapproved",
+  "policyOwner": "Platform Security and Governance",
+  "proposedOperationalRetentionDays": 365,
+  "archiveAfterDays": null,
+  "autoDeletionEnabled": false,
+  "purgeApiEnabled": false,
+  "purgeJobEnabled": false,
+  "legalHoldRegistryStatus": "not_implemented",
+  "legalHoldEnforcementStatus": "not_implemented",
+  "immutableArchiveStatus": "not_configured",
+  "archiveVerificationStatus": "not_configured",
+  "organizationOverrideStatus": "not_implemented",
+  "approvedBy": null,
+  "approvalDate": null,
+  "rationale": "Proposed assessment horizon only. No operational or regulatory retention period approved; no deletion permitted.",
+  "reviewNotes": "Confirm governing laws, contracts, incident response needs, tenant-specific obligations, legal hold model, backups, WORM/archive verification, and exception approval before activating policy."
+}
