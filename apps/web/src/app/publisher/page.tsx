@@ -48,6 +48,9 @@ import RefreshOutlined
 import AppShell
   from "@/components/app-shell";
 
+import PublisherUsersDialog from "@/components/publisher-users-dialog";
+import { loadMyPublisherPermissions } from "@/lib/publisher-users";
+
 import ProtectedRoute
   from "@/components/protected-route";
 
@@ -170,6 +173,9 @@ function formatDate(
 
 
 export default function PublisherPage() {
+  const [publisherUsersOpen, setPublisherUsersOpen] = useState(false);
+  const [canManagePublisher, setCanManagePublisher] = useState(false);
+
 
   const [
   buildingVersionId,
@@ -827,6 +833,21 @@ const refreshWorkspace =
     setSelectedApplicationId,
   ] = useState("");
 
+  useEffect(() => {
+    let cancelled = false;
+    setCanManagePublisher(false);
+    if (selectedPublisherId) {
+      void loadMyPublisherPermissions(selectedPublisherId)
+        .then((permissions) => {
+          if (!cancelled) setCanManagePublisher(permissions.includes("publisher.manage"));
+        })
+        .catch(() => {
+          if (!cancelled) setCanManagePublisher(false);
+        });
+    }
+    return () => { cancelled = true; };
+  }, [selectedPublisherId]);
+
   const selectedPublisher =
   publishers.find(
     (publisher) =>
@@ -1277,6 +1298,12 @@ const refreshWorkspace =
 
                 )}
 
+
+                {canManagePublisher && selectedPublisherId && (
+                  <Button variant="outlined" onClick={() => setPublisherUsersOpen(true)}>
+                    Publisher Users &amp; Roles
+                  </Button>
+                )}
 
                 <Button
                   variant="contained"
@@ -2120,7 +2147,14 @@ const refreshWorkspace =
 
 )}
 
-          {selectedPublisher && (
+          <PublisherUsersDialog
+           open={publisherUsersOpen && Boolean(selectedPublisherId) && canManagePublisher}
+           publisherId={selectedPublisherId}
+           publisherName={selectedPublisher?.name ?? "Publisher"}
+           onClose={() => setPublisherUsersOpen(false)}
+         />
+
+         {selectedPublisher && (
 
   <ApplicationUploadDialog
     open={

@@ -47,6 +47,10 @@ from services.api.app.services.authorization_service import (
     require_publisher_permission,
 )
 
+from services.api.app.services.audit_service import (
+    record_audit_event,
+)
+
 from services.api.app.services.version_policy_service import (
     VersionPolicyError,
     validate_offer_version_policy,
@@ -706,8 +710,33 @@ def create_offer(
         )
 
     # =====================================================
-    # 9. COMMIT
+    # 9. AUDIT + COMMIT
     # =====================================================
+
+    record_audit_event(
+        db,
+        action="offer.created",
+        resource_type="application_offer",
+        resource_id=offer.id,
+        actor_user_id=current_user.id,
+        publisher_id=application.publisher_id,
+        outcome="success",
+        message="Application offer created.",
+        metadata={
+            "applicationId": str(application.id),
+            "offerKey": offer.offer_key,
+            "status": offer.status,
+            "deliveryType": offer.delivery_type,
+            "versionPolicy": offer.version_policy,
+            "pinnedVersionId": (
+                str(offer.pinned_version_id)
+                if offer.pinned_version_id
+                else None
+            ),
+            "autoUpgrade": offer.auto_upgrade,
+            "entitlementCodes": entitlement_codes,
+        },
+    )
 
     db.commit()
 
@@ -1091,8 +1120,32 @@ def update_offer(
             )
 
     # =====================================================
-    # 9. COMMIT
+    # 9. AUDIT + COMMIT
     # =====================================================
+
+    record_audit_event(
+        db,
+        action="offer.updated",
+        resource_type="application_offer",
+        resource_id=offer.id,
+        actor_user_id=current_user.id,
+        publisher_id=application.publisher_id,
+        outcome="success",
+        message="Draft application offer updated.",
+        metadata={
+            "applicationId": str(application.id),
+            "offerKey": offer.offer_key,
+            "changedFields": sorted(fields_set),
+            "status": offer.status,
+            "versionPolicy": offer.version_policy,
+            "pinnedVersionId": (
+                str(offer.pinned_version_id)
+                if offer.pinned_version_id
+                else None
+            ),
+            "autoUpgrade": offer.auto_upgrade,
+        },
+    )
 
     db.commit()
 
@@ -1306,6 +1359,23 @@ def activate_offer(
         )
     )
 
+    record_audit_event(
+        db,
+        action="offer.activated",
+        resource_type="application_offer",
+        resource_id=offer.id,
+        actor_user_id=current_user.id,
+        publisher_id=application.publisher_id,
+        outcome="success",
+        message="Application offer activated.",
+        metadata={
+            "applicationId": str(application.id),
+            "offerKey": offer.offer_key,
+            "versionPolicy": offer.version_policy,
+            "publishedVersionId": str(published_version.id),
+        },
+    )
+
     db.commit()
 
     return {
@@ -1435,6 +1505,22 @@ def retire_offer(
 
     offer.status = (
         "retired"
+    )
+
+    record_audit_event(
+        db,
+        action="offer.retired",
+        resource_type="application_offer",
+        resource_id=offer.id,
+        actor_user_id=current_user.id,
+        publisher_id=application.publisher_id,
+        outcome="success",
+        message="Application offer retired.",
+        metadata={
+            "applicationId": str(application.id),
+            "offerKey": offer.offer_key,
+            "status": offer.status,
+        },
     )
 
     db.commit()

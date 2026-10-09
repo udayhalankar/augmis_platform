@@ -21,10 +21,21 @@ class Publisher(Base):
 
     __tablename__ = "publishers"
 
+    __table_args__ = (
+        UniqueConstraint("tenant_id", name="uq_publishers_single_workspace_per_tenant"),
+    )
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4
+    )
+
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
 
     name: Mapped[str] = mapped_column(

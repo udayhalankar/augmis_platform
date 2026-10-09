@@ -51,6 +51,10 @@ import ReplayOutlined from "@mui/icons-material/ReplayOutlined";
 import SearchOutlined from "@mui/icons-material/SearchOutlined";
 
 import AppShell from "@/components/app-shell";
+import PublisherUsersDialog from "@/components/publisher-users-dialog";
+import { loadMyPublisherPermissions } from "@/lib/publisher-users";
+import { loadOrganizationPublishers, activateOrganizationPublisher,
+  type OrganizationPublisher } from "@/lib/organization-publisher";
 import ProtectedRoute from "@/components/protected-route";
 import PermissionGuard
   from "@/components/permission-guard";
@@ -315,6 +319,12 @@ export default function UsersPage() {
     hasTenantPermission(
       "tenant.users.manage"
     );
+
+  const [orgPublisher, setOrgPublisher] = useState<OrganizationPublisher | null>(null);
+  const [publisherAccess, setPublisherAccess] = useState(false);
+  const [publisherBusy, setPublisherBusy] = useState(false);
+  const [publisherDialogOpen, setPublisherDialogOpen] = useState(false);
+  const [publisherError, setPublisherError] = useState("");
 
   const [
     memberships,
@@ -768,6 +778,56 @@ export default function UsersPage() {
       )
     );
 
+
+  useEffect(() => {
+    let ignore = false;
+    setOrgPublisher(null);
+    setPublisherAccess(false);
+    setPublisherDialogOpen(false);
+    setPublisherError("");
+    if (!selectedTenantId || !canManageUsers) return () => { ignore = true; };
+    const fetchPublisher = async () => {
+      try {
+        const rows = await loadOrganizationPublishers(selectedTenantId);
+        const workspace = rows[0] ?? null;
+        if (ignore) return;
+        setOrgPublisher(workspace);
+        if (!workspace) return;
+        try {
+          const permissions = await loadMyPublisherPermissions(workspace.id);
+          if (!ignore) setPublisherAccess(permissions.includes("publisher.manage"));
+        } catch {
+          if (!ignore) setPublisherAccess(false);
+        }
+      } catch (e) {
+        if (!ignore) setPublisherError(apiError(e, "Publisher workspace could not be loaded."));
+      }
+    };
+    void fetchPublisher();
+    return () => { ignore = true; };
+  }, [selectedTenantId, canManageUsers]);
+
+  const enablePublisherWorkspace = async () => {
+    if (!selectedTenantId || !canManageTenantOwners) return;
+    setPublisherBusy(true);
+    setPublisherError("");
+    try {
+      const workspace = await activateOrganizationPublisher(selectedTenantId);
+      setOrgPublisher(workspace);
+      try {
+        const permissions = await loadMyPublisherPermissions(workspace.id);
+        setPublisherAccess(permissions.includes("publisher.manage"));
+      } catch (accessError) {
+        setPublisherAccess(false);
+        setPublisherError(apiError(accessError, "Workspace enabled but publisher permissions could not be loaded. Refresh the page."));
+      }
+      setMessage(`Publisher workspace ${workspace.name} is enabled.`);
+    } catch (e) {
+      setPublisherError(apiError(e, "Publisher workspace activation failed."));
+    } finally {
+      setPublisherBusy(false);
+    }
+  };
 
   const assignableRoles =
     useMemo(
@@ -1647,6 +1707,44 @@ export default function UsersPage() {
             </Box>
           ) : null}
 
+
+          {canManageUsers && selectedTenantId && (
+            <Box sx={{ bgcolor: "background.paper", border: "1px solid", borderColor: "divider", p: 2, mb: 2 }}>
+              <Typography sx={{ fontSize: 11, color: "text.secondary", textTransform: "uppercase", mb: 0.5 }}>
+                Publisher capability
+              </Typography>
+              <Box sx={{ display: "flex", flexDirection: { xs: "column", sm: "row" }, alignItems: { xs: "flex-start", sm: "center" }, justifyContent: "space-between", gap: 2 }}>
+                <Box>
+                  <Typography sx={{ fontWeight: 600 }}>
+                    {orgPublisher ? orgPublisher.name : `${selectedTenant?.tenant.name ?? "Organization"} Workspace (not enabled)`}
+                  </Typography>
+                  <Typography sx={{ fontSize: 12, color: "text.secondary" }}>
+                    One publishing workspace per organization. Tenant membership does not grant publisher access.
+                  </Typography>
+                </Box>
+                {orgPublisher && publisherAccess ? (
+                  <Button variant="outlined" onClick={() => setPublisherDialogOpen(true)}>Publisher Users & Roles</Button>
+                ) : !orgPublisher && canManageTenantOwners ? (
+                  <Button variant="contained" disabled={publisherBusy} onClick={() => void enablePublisherWorkspace()}>
+                    {publisherBusy ? "Enabling..." : "Enable Publisher"}
+                  </Button>
+                ) : (
+                  <Typography sx={{ fontSize: 12, color: "text.secondary" }}>
+                    {orgPublisher ? "Publisher administrator access is required." : "Ask an active Tenant Owner to enable publishing."}
+                  </Typography>
+                )}
+              </Box>
+              {publisherError && <Alert severity="error" sx={{ mt: 1 }}>{publisherError}</Alert>}
+              {orgPublisher && (
+                <PublisherUsersDialog
+                  open={publisherDialogOpen}
+                  publisherId={orgPublisher.id}
+                  publisherName={orgPublisher.name}
+                  onClose={() => setPublisherDialogOpen(false)}
+                />
+              )}
+            </Box>
+          )}
 
           {message && (
             <Alert

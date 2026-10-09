@@ -51,6 +51,8 @@ from services.api.app.models.platform import (
 )
 from datetime import datetime, timezone
 
+from services.api.app.services.audit_service import record_audit_event
+
 from services.api.app.services.build_engine import (
     BuildError,
     build_docker_image
@@ -250,6 +252,21 @@ def upload_application(
 
     db.add(package)
 
+    record_audit_event(
+        db=db,
+        action="application.package.uploaded",
+        resource_type="application_package",
+        resource_id=package.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "filename": package.original_filename,
+            "sizeBytes": package.size_bytes,
+            "format": "zip",
+            "status": "validating",
+        },
+        message="Application package received for validation.",
+    )
     db.commit()
 
     validation_run = (
@@ -261,6 +278,16 @@ def upload_application(
 
     db.add(validation_run)
 
+    record_audit_event(
+        db=db,
+        action="application.package.validation.started",
+        resource_type="application_package",
+        resource_id=package.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={"validationStatus": "running"},
+        message="Application package validation started.",
+    )
     db.commit()
 
     try:
@@ -308,6 +335,20 @@ def upload_application(
             str(error)
         ]
 
+        record_audit_event(
+            db=db,
+            action="application.package.validation.failed",
+            resource_type="application_package",
+            resource_id=package.id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            outcome="failed",
+            metadata={
+                "validationStatus": "invalid",
+                "errorType": type(error).__name__,
+            },
+            message="Application package validation failed.",
+        )
         db.commit()
 
         raise HTTPException(
@@ -339,6 +380,12 @@ def upload_application(
             Application.app_key
             == metadata["id"]
         )
+    )
+
+    new_application = application is None
+    previous_application_details = (
+        (application.name, application.description)
+        if application is not None else None
     )
 
     if not application:
@@ -455,6 +502,74 @@ def upload_application(
 
     validation_run.errors = []
 
+    if (
+        previous_application_details is not None
+        and previous_application_details != (application.name, application.description)
+    ):
+        changed_fields = [
+            field
+            for field, before, after in (
+                ("name", previous_application_details[0], application.name),
+                ("description", previous_application_details[1], application.description),
+            )
+            if before != after
+        ]
+        record_audit_event(
+            db=db,
+            action="application.updated",
+            resource_type="application",
+            resource_id=application.id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            metadata={
+                "appKey": application.app_key,
+                "changedFields": changed_fields,
+            },
+            message="Publisher application metadata updated with new version.",
+        )
+
+    if new_application:
+        record_audit_event(
+            db=db,
+            action="application.created",
+            resource_type="application",
+            resource_id=application.id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            metadata={"appKey": application.app_key},
+            message="Publisher application registered.",
+        )
+
+    record_audit_event(
+        db=db,
+        action="application.version.created",
+        resource_type="application_version",
+        resource_id=version.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "version": version.version,
+            "buildType": version.build_type,
+            "publicationStatus": "draft",
+        },
+        message="Application version registered.",
+    )
+    record_audit_event(
+        db=db,
+        action="application.package.validated",
+        resource_type="application_package",
+        resource_id=package.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "versionId": str(version.id),
+            "sha256": package.sha256,
+            "format": "zip",
+        },
+        message="Application package validated successfully.",
+    )
     db.commit()
 
     return {
@@ -826,6 +941,26 @@ def upload_static_application(
             )
 
 
+        # No database package record exists on this failure path.
+        # The failed attempt is therefore audited independently.
+        record_audit_event(
+            db=db,
+            action="application.package.validation.failed",
+            resource_type="application_package",
+            resource_id=package_id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            outcome="failed",
+            metadata={
+                "appKey": clean_key,
+                "version": clean_version,
+                "format": package_format,
+                "errorType": type(error).__name__,
+            },
+            message="Static application package validation failed.",
+        )
+        db.commit()
+
         raise HTTPException(
             status_code=422,
             detail={
@@ -848,6 +983,12 @@ def upload_static_application(
         existing_application
     )
 
+
+    new_application = application is None
+    previous_application_details = (
+        (application.name, application.description)
+        if application is not None else None
+    )
 
     if not application:
 
@@ -1090,6 +1231,26 @@ def upload_static_application(
 
         db.rollback()
 
+        # The failed database transaction is rolled back before
+        # recording the independent rejection evidence.
+        record_audit_event(
+            db=db,
+            action="application.package.validation.failed",
+            resource_type="application_package",
+            resource_id=package_id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            outcome="failed",
+            metadata={
+                "appKey": clean_key,
+                "version": clean_version,
+                "format": package_format,
+                "stage": "extraction",
+                "errorType": type(error).__name__,
+            },
+            message="Static application package extraction failed.",
+        )
+        db.commit()
 
         raise HTTPException(
             status_code=422,
@@ -1167,7 +1328,90 @@ def upload_static_application(
         validation_run
     )
 
+    if (
+        previous_application_details is not None
+        and previous_application_details != (application.name, application.description)
+    ):
+        changed_fields = [
+            field
+            for field, before, after in (
+                ("name", previous_application_details[0], application.name),
+                ("description", previous_application_details[1], application.description),
+            )
+            if before != after
+        ]
+        record_audit_event(
+            db=db,
+            action="application.updated",
+            resource_type="application",
+            resource_id=application.id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            metadata={
+                "appKey": application.app_key,
+                "changedFields": changed_fields,
+            },
+            message="Publisher application metadata updated with new version.",
+        )
 
+    if new_application:
+        record_audit_event(
+            db=db,
+            action="application.created",
+            resource_type="application",
+            resource_id=application.id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            metadata={"appKey": application.app_key},
+            message="Publisher application registered.",
+        )
+
+    record_audit_event(
+        db=db,
+        action="application.package.uploaded",
+        resource_type="application_package",
+        resource_id=package.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "versionId": str(version_row.id),
+            "sizeBytes": package.size_bytes,
+            "format": package_format,
+        },
+        message="Static application package uploaded.",
+    )
+    record_audit_event(
+        db=db,
+        action="application.version.created",
+        resource_type="application_version",
+        resource_id=version_row.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "version": version_row.version,
+            "buildType": "static_web",
+            "publicationStatus": "draft",
+        },
+        message="Static application version registered.",
+    )
+    record_audit_event(
+        db=db,
+        action="application.package.validated",
+        resource_type="application_package",
+        resource_id=package.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "versionId": str(version_row.id),
+            "sha256": sha256,
+            "format": package_format,
+            "fileCount": extraction_info["fileCount"],
+        },
+        message="Static application package validated successfully.",
+    )
     db.commit()
 
 
@@ -1531,7 +1775,23 @@ def build_application_package(
     )
 
     db.add(build)
+    db.flush()  # Assign build.id before using it as audit resource ID.
 
+    record_audit_event(
+        db=db,
+        action="application.build.started",
+        resource_type="application_build",
+        resource_id=build.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "versionId": str(version.id),
+            "packageId": str(package.id),
+            "version": version.version,
+        },
+        message="Application image build started.",
+    )
     db.commit()
 
     db.refresh(build)
@@ -1568,6 +1828,22 @@ def build_application_package(
             "build_failed"
         )
 
+        record_audit_event(
+            db=db,
+            action="application.build.failed",
+            resource_type="application_build",
+            resource_id=build.id,
+            publisher_id=publisher.id,
+            actor_user_id=current_user.id,
+            outcome="failed",
+            metadata={
+                "applicationId": str(application.id),
+                "versionId": str(version.id),
+                "packageId": str(package.id),
+                "errorType": type(error).__name__,
+            },
+            message="Application image build failed.",
+        )
         db.commit()
 
         raise HTTPException(
@@ -1608,6 +1884,22 @@ def build_application_package(
         "image_ready"
     )
 
+    record_audit_event(
+        db=db,
+        action="application.build.succeeded",
+        resource_type="application_build",
+        resource_id=build.id,
+        publisher_id=publisher.id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "versionId": str(version.id),
+            "packageId": str(package.id),
+            "imageRef": build.image_ref,
+            "versionStatus": version.status,
+        },
+        message="Application image build succeeded.",
+    )
     db.commit()
 
     db.refresh(build)
@@ -2275,6 +2567,39 @@ def publish_application_version(
     version.publication_status = "published"
     application.status = "published"
 
+    for superseded_version in other_published_versions:
+        record_audit_event(
+            db=db,
+            action="application.version.retired",
+            resource_type="application_version",
+            resource_id=superseded_version.id,
+            publisher_id=application.publisher_id,
+            actor_user_id=current_user.id,
+            metadata={
+                "applicationId": str(application.id),
+                "version": superseded_version.version,
+                "reason": "superseded",
+                "replacementVersionId": str(version.id),
+            },
+            message="Previously published version superseded.",
+        )
+
+    record_audit_event(
+        db=db,
+        action="application.version.published",
+        resource_type="application_version",
+        resource_id=version.id,
+        publisher_id=application.publisher_id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "version": version.version,
+            "buildType": version.build_type,
+            "previousPublicationStatus": publication_status,
+            "publicationStatus": "published",
+        },
+        message="Application version published.",
+    )
     db.commit()
 
     db.refresh(version)
@@ -2382,6 +2707,22 @@ def retire_application_version(
     else:
         application.status = "retired"
 
+    record_audit_event(
+        db=db,
+        action="application.version.retired",
+        resource_type="application_version",
+        resource_id=version.id,
+        publisher_id=application.publisher_id,
+        actor_user_id=current_user.id,
+        metadata={
+            "applicationId": str(application.id),
+            "version": version.version,
+            "reason": "manual",
+            "previousPublicationStatus": publication_status,
+            "publicationStatus": "retired",
+        },
+        message="Application version retired.",
+    )
     db.commit()
 
     db.refresh(version)

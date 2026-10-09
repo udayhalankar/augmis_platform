@@ -27,3 +27,6 @@ data/packages/
 
 # Logs
 *.log
+
+# Local patch backups
+*.bak

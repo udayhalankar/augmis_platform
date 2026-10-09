@@ -124,8 +124,6 @@ const navigation: NavigationItem[] = [
     {
     label: "Audit",
     href: "/audit",
-    tenantPermission:
-      "audit.view",
     icon: (
       <HistoryOutlined
         fontSize="small"

@@ -37,6 +37,10 @@ from services.api.app.services.membership_service import (
     create_tenant_owner_membership
 )
 
+from services.api.app.services.audit_service import (
+    record_audit_event,
+)
+
 
 router = APIRouter(
     prefix="/api/v1/tenants",
@@ -103,6 +107,23 @@ def create_tenant(
             db=db,
             tenant_id=tenant.id,
             user_id=current_user.id
+        )
+
+        record_audit_event(
+            db,
+            action="platform.tenant.created",
+            resource_type="tenant",
+            resource_id=tenant.id,
+            actor_user_id=current_user.id,
+            tenant_id=tenant.id,
+            outcome="success",
+            message="Tenant created successfully.",
+            metadata={
+                "name": tenant.name,
+                "slug": tenant.slug,
+                "status": tenant.status,
+                "initialOwnerUserId": str(current_user.id),
+            },
         )
 
         db.commit()

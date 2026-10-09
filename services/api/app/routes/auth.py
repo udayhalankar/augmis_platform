@@ -34,6 +34,10 @@ from services.api.app.services.auth_service import (
     verify_password
 )
 
+from services.api.app.services.audit_service import (
+    record_audit_event,
+)
+
 
 router = APIRouter(
     prefix="/api/v1/auth",
@@ -83,6 +87,22 @@ def register(
 
     db.add(user)
 
+    db.flush()
+
+    record_audit_event(
+        db,
+        action="auth.user.registered",
+        resource_type="user_account",
+        resource_id=user.id,
+        actor_user_id=user.id,
+        outcome="success",
+        message="User account registered.",
+        metadata={
+            "email": user.email,
+            "status": user.status,
+        },
+    )
+
     db.commit()
 
     db.refresh(user)
@@ -113,6 +133,20 @@ def login(
 
     if not user:
 
+        record_audit_event(
+            db,
+            action="auth.login.failed",
+            resource_type="authentication",
+            resource_id=normalized,
+            outcome="failed",
+            message="Login failed: invalid credentials.",
+            metadata={
+                "reason": "invalid_credentials",
+            },
+        )
+
+        db.commit()
+
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password"
@@ -123,12 +157,43 @@ def login(
         user.password_hash
     ):
 
+        record_audit_event(
+            db,
+            action="auth.login.failed",
+            resource_type="user_account",
+            resource_id=user.id,
+            actor_user_id=user.id,
+            outcome="failed",
+            message="Login failed: invalid credentials.",
+            metadata={
+                "reason": "invalid_credentials",
+            },
+        )
+
+        db.commit()
+
         raise HTTPException(
             status_code=401,
             detail="Invalid email or password"
         )
 
     if user.status != "active":
+
+        record_audit_event(
+            db,
+            action="auth.login.denied",
+            resource_type="user_account",
+            resource_id=user.id,
+            actor_user_id=user.id,
+            outcome="denied",
+            message="Login denied because the account is not active.",
+            metadata={
+                "status": user.status,
+                "reason": "account_not_active",
+            },
+        )
+
+        db.commit()
 
         raise HTTPException(
             status_code=403,
@@ -138,6 +203,21 @@ def login(
     token = create_access_token(
         str(user.id)
     )
+
+    record_audit_event(
+        db,
+        action="auth.login.succeeded",
+        resource_type="user_account",
+        resource_id=user.id,
+        actor_user_id=user.id,
+        outcome="success",
+        message="User login succeeded.",
+        metadata={
+            "status": user.status,
+        },
+    )
+
+    db.commit()
 
     return TokenResponse(
         access_token=token

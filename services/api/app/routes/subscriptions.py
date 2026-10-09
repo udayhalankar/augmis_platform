@@ -1853,6 +1853,34 @@ def subscribe_to_offer(
             )
         )
 
+    record_audit_event(
+        db,
+        action="subscription.created",
+        resource_type="tenant_subscription",
+        resource_id=subscription.id,
+        actor_user_id=current_user.id,
+        tenant_id=subscription.tenant_id,
+        outcome="success",
+        message="Tenant subscription created.",
+        metadata={
+            "applicationId": str(application.id),
+            "offerId": str(offer.id),
+            "offerKey": offer.offer_key,
+            "baselineVersionId": str(subscription.baseline_version_id),
+            "versionPolicy": subscription.version_policy,
+            "pinnedVersionId": (
+                str(subscription.pinned_version_id)
+                if subscription.pinned_version_id
+                else None
+            ),
+            "autoUpgrade": subscription.auto_upgrade,
+            "entitlementCodes": [
+                template.code
+                for template in offer_entitlements
+            ],
+        },
+    )
+
     db.commit()
 
     db.refresh(subscription)
@@ -2812,6 +2840,7 @@ def suspend_tenant_subscription(
             db=db,
             subscription=subscription,
             reason=payload.reason,
+            actor_user_id=current_user.id,
         )
 
     except SubscriptionLifecycleError as error:
@@ -2909,6 +2938,7 @@ def resume_tenant_subscription(
         resume_subscription(
             db=db,
             subscription=subscription,
+            actor_user_id=current_user.id,
         )
 
     except SubscriptionLifecycleError as error:
@@ -3000,6 +3030,10 @@ def cancel_subscription(
             ),
         )
 
+    previous_status = (
+        subscription.status
+    )
+
     now = datetime.now(
         timezone.utc
     )
@@ -3028,6 +3062,25 @@ def cancel_subscription(
 
         entitlement.status = "revoked"
         entitlement.ends_at = now
+
+    record_audit_event(
+        db,
+        action="subscription.cancelled",
+        resource_type="tenant_subscription",
+        resource_id=subscription.id,
+        actor_user_id=current_user.id,
+        tenant_id=subscription.tenant_id,
+        outcome="success",
+        message="Tenant subscription cancelled.",
+        metadata={
+            "previousStatus": previous_status,
+            "offerId": str(subscription.offer_id),
+            "revokedEntitlementCodes": [
+                entitlement.code
+                for entitlement in entitlements
+            ],
+        },
+    )
 
     db.commit()
 

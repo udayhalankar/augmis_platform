@@ -64,6 +64,13 @@ PERMISSION_DEFINITIONS = {
             "platform",
     },
 
+    "platform.audit.view": {
+        "name":
+            "View platform audit events",
+
+        "scope_type":
+            "platform",
+    },
 
     # --------------------------------------------------------
     # TENANT SCOPE
@@ -231,6 +238,7 @@ ROLE_BLUEPRINTS = {
             "platform.rbac.manage",
             "platform.tenants.manage",
             "platform.publishers.manage",
+            "platform.audit.view",
         ],
     },
 
