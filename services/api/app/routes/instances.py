@@ -78,6 +78,10 @@ from services.api.app.services.deployment_engine import (
     start_container,
     stop_container,
 )
+from services.api.app.services.runtime_log_archive import (
+    archive_before_removal,
+    archive_failed_start,
+)
 
 from services.api.app.services.entitlement_service import (
     EntitlementError,
@@ -728,22 +732,6 @@ def _rewrite_gateway_html(
     except UnicodeDecodeError:
         return payload
 
-    if "<base " not in html.lower():
-
-        html = re.sub(
-            r"(?i)<head([^>]*)>",
-            lambda match: (
-                match.group(0)
-                + (
-                    '<base href="'
-                    + gateway_base
-                    + '">'
-                )
-            ),
-            html,
-            count=1,
-        )
-
     html = re.sub(
         r'''(?i)\b(href|src|action)=([\"'])/(?!/)''',
         lambda match: (
@@ -763,6 +751,22 @@ def _rewrite_gateway_html(
         ),
         html,
     )
+
+    if "<base " not in html.lower():
+
+        html = re.sub(
+            r"(?i)<head([^>]*)>",
+            lambda match: (
+                match.group(0)
+                + (
+                    '<base href="'
+                    + gateway_base
+                    + '">'
+                )
+            ),
+            html,
+            count=1,
+        )
 
     return html.encode(
         "utf-8"
@@ -1219,9 +1223,10 @@ def upgrade_application_instance(
     # 1. LOAD INSTANCE
     # =====================================================
 
-    instance = db.get(
-        ApplicationInstance,
-        instance_id,
+    instance = db.scalar(
+        select(ApplicationInstance)
+        .where(ApplicationInstance.id == instance_id)
+        .with_for_update()
     )
 
     if not instance:
@@ -1519,6 +1524,7 @@ def upgrade_application_instance(
         candidate.status = "failed"
         candidate.health_status = "unhealthy"
         candidate.error_message = str(error)
+        archive_failed_start(candidate, error)
 
         instance.status = "running"
 
@@ -1541,6 +1547,19 @@ def upgrade_application_instance(
             },
         ) from error
 
+    # B1A: persist the healthy candidate reference before deleting the old
+    # container. A crash now leaves enough DB metadata to reconcile safely.
+    candidate.container_id = result["container_id"]
+    candidate.container_name = result["container_name"]
+    candidate.host_port = result["host_port"]
+    candidate.runtime_url = result["runtime_url"]
+    candidate.health_status = "healthy"
+    db.commit()
+
+    # Snapshot outgoing logs before their Docker container is deleted.
+    archive_before_removal(current_deployment)
+    db.commit()
+
     # =====================================================
     # 9. CANDIDATE IS HEALTHY
     #
@@ -1557,6 +1576,8 @@ def upgrade_application_instance(
 
         # Old runtime could not be retired.
         # Remove the candidate and preserve the old runtime.
+        archive_before_removal(candidate)
+        db.commit()
 
         try:
 
@@ -1987,6 +2008,7 @@ def deploy_application(
         deployment.error_message = (
             str(error)
         )
+        archive_failed_start(deployment, error)
 
         db.commit()
 
@@ -2840,9 +2862,10 @@ def rollback_application_instance(
     # 1. LOAD INSTANCE
     # =====================================================
 
-    instance = db.get(
-        ApplicationInstance,
-        instance_id,
+    instance = db.scalar(
+        select(ApplicationInstance)
+        .where(ApplicationInstance.id == instance_id)
+        .with_for_update()
     )
 
     if not instance:
@@ -3151,6 +3174,7 @@ def rollback_application_instance(
         candidate.status = "failed"
         candidate.health_status = "unhealthy"
         candidate.error_message = str(error)
+        archive_failed_start(candidate, error)
 
         instance.status = "running"
 
@@ -3173,6 +3197,19 @@ def rollback_application_instance(
             },
         ) from error
 
+    # B1A: persist the healthy candidate reference before deleting the old
+    # container. A crash now leaves enough DB metadata to reconcile safely.
+    candidate.container_id = result["container_id"]
+    candidate.container_name = result["container_name"]
+    candidate.host_port = result["host_port"]
+    candidate.runtime_url = result["runtime_url"]
+    candidate.health_status = "healthy"
+    db.commit()
+
+    # Snapshot outgoing logs before their Docker container is deleted.
+    archive_before_removal(current_deployment)
+    db.commit()
+
     # =====================================================
     # 11. CANDIDATE HEALTHY — RETIRE CURRENT CONTAINER
     # =====================================================
@@ -3187,6 +3224,8 @@ def rollback_application_instance(
 
         # Remove rollback candidate and preserve current
         # runtime if promotion cannot complete.
+        archive_before_removal(candidate)
+        db.commit()
 
         try:
 
@@ -3366,9 +3405,10 @@ def stop_application_instance(
     # 1. LOAD INSTANCE
     # =====================================================
 
-    instance = db.get(
-        ApplicationInstance,
-        instance_id,
+    instance = db.scalar(
+        select(ApplicationInstance)
+        .where(ApplicationInstance.id == instance_id)
+        .with_for_update()
     )
 
     if not instance:
@@ -3400,6 +3440,12 @@ def stop_application_instance(
             status_code=403,
             detail=str(error),
         ) from error
+
+    if instance.status not in ("running", "stopped"):
+        raise HTTPException(
+            status_code=409,
+            detail="Instance lifecycle operation is already in progress.",
+        )
 
     # =====================================================
     # 3. FIND RUNNING DEPLOYMENT
@@ -3443,6 +3489,11 @@ def stop_application_instance(
             detail="Deployment has no container.",
         )
 
+    # Record the intent and logs before destructive Docker removal.
+    archive_before_removal(deployment)
+    instance.status = "stopping"
+    db.commit()
+
     # =====================================================
     # 4. STOP CONTAINER
     # =====================================================
@@ -3454,7 +3505,8 @@ def stop_application_instance(
         )
 
     except DeploymentError as error:
-
+        instance.status = "running"
+        db.commit()
         raise HTTPException(
             status_code=422,
             detail=str(error),
@@ -3793,6 +3845,7 @@ def restart_application_instance(
         deployment.status = "failed"
         deployment.health_status = "unhealthy"
         deployment.error_message = str(error)
+        archive_failed_start(deployment, error)
 
         # Restart failure leaves the logical instance stopped.
         instance.status = "stopped"

@@ -46,6 +46,7 @@ from services.api.app.services.deployment_engine import (
     get_container_logs,
     run_docker,
 )
+from services.api.app.services.runtime_log_archive import archived_tail
 
 
 router = APIRouter(
@@ -530,83 +531,53 @@ def deployment_logs(
         )
 
     # =====================================================
-    # 5. RETRIEVE DOCKER LOGS
+    # 5. Historical snapshot fallback (existing RBAC above applies)
     # =====================================================
 
+    def archived_response():
+        return {
+            "deploymentId": str(deployment.id),
+            "instanceId": str(instance.id),
+            "deploymentStatus": deployment.status,
+            "containerName": deployment.container_name,
+            "tail": tail,
+            "logs": archived_tail(deployment, tail),
+            "source": "archived",
+            "archivedAt": deployment.archived_logs_at,
+            "truncated": deployment.archived_logs_truncated,
+        }
+
+    if deployment.status != "running" and deployment.archived_logs_at is not None:
+        return archived_response()
+
     try:
-
-        logs = get_container_logs(
-            container_name=(
-                deployment.container_name
-            ),
-            tail=tail,
-        )
-
+        logs = get_container_logs(container_name=deployment.container_name, tail=tail)
     except DeploymentError as error:
-
-        error_text = str(error)
-
-        # Stopped deployments are currently removed using
-        # `docker rm -f`, so Docker can no longer provide
-        # historical logs.
-
-        if (
-            "no such container"
-            in error_text.lower()
-            or "no such object"
-            in error_text.lower()
-        ):
-
+        if any(k in str(error).lower() for k in ("no such container", "no such object")):
+            if deployment.archived_logs_at is not None:
+                return archived_response()
             raise HTTPException(
                 status_code=410,
                 detail={
-                    "message": (
-                        "Deployment container "
-                        "no longer exists."
-                    ),
-
-                    "reason": (
-                        "Historical runtime logs "
-                        "were not persisted before "
-                        "the container was removed."
-                    ),
-
-                    "deploymentId":
-                        str(deployment.id),
+                    "message": "Deployment container no longer exists.",
+                    "reason": "Historical logs were not archived.",
+                    "deploymentId": str(deployment.id),
+                    "archiveError": deployment.archived_logs_error,
                 },
             ) from error
-
         raise HTTPException(
             status_code=502,
-            detail={
-                "message":
-                    "Could not retrieve deployment logs",
-
-                "error":
-                    error_text,
-            },
+            detail={"message": "Could not retrieve deployment logs"},
         ) from error
 
-    # =====================================================
-    # 6. RESPONSE
-    # =====================================================
-
     return {
-        "deploymentId":
-            str(deployment.id),
-
-        "instanceId":
-            str(instance.id),
-
-        "deploymentStatus":
-            deployment.status,
-
-        "containerName":
-            deployment.container_name,
-
-        "tail":
-            tail,
-
-        "logs":
-            logs,
+        "deploymentId": str(deployment.id),
+        "instanceId": str(instance.id),
+        "deploymentStatus": deployment.status,
+        "containerName": deployment.container_name,
+        "tail": tail,
+        "logs": logs,
+        "source": "docker",
+        "archivedAt": None,
+        "truncated": False,
     }

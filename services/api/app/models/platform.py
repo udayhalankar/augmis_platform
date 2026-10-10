@@ -2,6 +2,7 @@ import uuid
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     JSON,
@@ -530,6 +531,20 @@ class ApplicationDeployment(Base):
     error_message: Mapped[str | None] = mapped_column(
         Text,
         nullable=True
+    )
+
+    # B1A: bounded, access-controlled historical log snapshot.
+    archived_logs: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    archived_logs_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    archived_logs_truncated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    archived_logs_error: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
     )
 
     deployed_at: Mapped[object | None] = mapped_column(

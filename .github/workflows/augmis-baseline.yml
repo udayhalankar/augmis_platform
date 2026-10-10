@@ -1,0 +1,44 @@
+name: AUGMIS Baseline (B0)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-static:
+    name: Backend syntax and runtime source contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile Python code
+        run: python -m compileall -q services/api/app tools
+      - name: Runtime source inventory
+        run: python -m tools.b0b1_runtime_inventory --ci
+  frontend-build:
+    name: Frontend types and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    env:
+      NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8001
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify reproducible npm install is available
+        run: test -f package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: TypeScript
+        run: npx tsc --noEmit
+      - name: Next.js production build
+        run: npm run build

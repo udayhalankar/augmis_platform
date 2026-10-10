@@ -75,6 +75,16 @@ const navigation: NavigationItem[] = [
     ),
   },
   {
+    label: "My Applications",
+    href: "/tenant-applications",
+    tenantPermission: "subscription.view",
+    icon: (
+      <AppsOutlined
+        fontSize="small"
+      />
+    ),
+  },
+  {
     label: "Marketplace",
     href: "/marketplace",
     icon: (

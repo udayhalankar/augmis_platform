@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 import subprocess
+import os
 import time
 import urllib.error
 import urllib.request
 
 
 class DeploymentError(Exception):
-    pass
+    def __init__(self, message: str, *, log_snapshot: str | None = None):
+        super().__init__(message)
+        self.log_snapshot = log_snapshot
+
+
+def runtime_resource_limits() -> tuple[str, str, str]:
+    """Platform-owned guardrails. Never accept limits from a publisher manifest."""
+    try:
+        memory_mb = int(os.environ.get("AUGMIS_RUNTIME_MEMORY_MB", "1024"))
+        cpus = float(os.environ.get("AUGMIS_RUNTIME_CPUS", "1"))
+        pids = int(os.environ.get("AUGMIS_RUNTIME_PIDS", "256"))
+    except (TypeError, ValueError) as exc:
+        raise DeploymentError("Invalid platform runtime resource configuration") from exc
+    if not 128 <= memory_mb <= 32768 or not 0.25 <= cpus <= 16 or not 32 <= pids <= 4096:
+        raise DeploymentError("Platform runtime resource configuration outside allowed range")
+    return f"{memory_mb}m", f"{cpus:g}", str(pids)
 
 
 def run_docker(
@@ -135,12 +151,15 @@ def start_container(
         service["port"]
     )
 
+    memory_limit, cpu_limit, pid_limit = runtime_resource_limits()
+
     command = [
-        "docker",
-        "run",
-        "-d",
-        "--name",
-        container_name
+        "docker", "run", "-d",
+        "--name", container_name,
+        "--memory", memory_limit,
+        "--memory-swap", memory_limit,
+        "--cpus", cpu_limit,
+        "--pids-limit", pid_limit,
     ]
 
     for key, value in labels.items():
@@ -229,22 +248,24 @@ def start_container(
             startup_timeout
         )
 
-    except Exception:
-
+    except Exception as startup_error:
+        # Docker removes failed candidates below. Preserve a bounded snapshot
+        # on the exception so the API can persist it with the deployment.
+        snapshot = None
         try:
-
-            run_docker(
-                [
-                    "docker",
-                    "rm",
-                    "-f",
-                    container_name
-                ]
-            )
-
-        except Exception:
+            snapshot = get_container_logs(container_name=container_name, tail=2000)
+        except DeploymentError:
             pass
 
+        try:
+            run_docker(["docker", "rm", "-f", container_name])
+        except DeploymentError:
+            pass
+
+        if isinstance(startup_error, DeploymentError):
+            raise DeploymentError(
+                str(startup_error), log_snapshot=snapshot,
+            ) from startup_error
         raise
 
     return {
