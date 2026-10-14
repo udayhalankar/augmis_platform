@@ -52,6 +52,7 @@ export type TenantAvailableApplication = {
 
   available: boolean;
   runtimeReady: boolean;
+  runtimeState?: "running" | "stopped" | "available";
 };
 
 

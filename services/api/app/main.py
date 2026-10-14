@@ -24,11 +24,17 @@ from services.api.app.routes import (
     publishers,
     rbac_admin,
     subscriptions,
+    runtime_control,
     tenants,
     tenant_users,
+    techtango_integration,
     webhooks,
 )
 
+
+from services.api.app.services.security_release_gate import require_safe_runtime_exposure
+
+require_safe_runtime_exposure()
 
 app = FastAPI(
     title=settings.app_name,
@@ -129,6 +135,8 @@ app.include_router(
 app.include_router(
     tenants.router
 )
+
+app.include_router(techtango_integration.router)
 
 
 # ============================================================
@@ -243,3 +251,6 @@ def root():
         "docs":
             "/docs",
     }
+
+# B1/B2 runtime control routes with backend authorization.
+app.include_router(runtime_control.router)

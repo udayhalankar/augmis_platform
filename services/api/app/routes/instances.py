@@ -73,6 +73,18 @@ from services.api.app.services.authorization_service import (
     require_tenant_permission,
 )
 
+from services.api.app.services.dashboard_runtime_assertions import (
+    ASSERTION_HEADER,
+    AssertionIssuanceError,
+    make_dashboard_request_assertion,
+    should_forward_request_header,
+    should_forward_response_header,
+)
+
+from services.api.app.services.tenant_application_runtime_control import (
+    get_runtime_launch_epoch, require_runtime_launch_allowed, set_runtime_desired_state,
+)
+from services.api.app.services.runtime_controls_service import start_scoped_container
 from services.api.app.services.deployment_engine import (
     DeploymentError,
     start_container,
@@ -137,10 +149,9 @@ _RUNTIME_GATEWAY_SESSION_SECONDS = (
 
 _RUNTIME_GATEWAY_TICKET_SECONDS = 60
 
-_RUNTIME_GATEWAY_SESSIONS: dict[
-    str,
-    dict,
-] = {}
+from services.api.app.services.shared_runtime_sessions import RedisSessionMap, shared_session_map
+
+_RUNTIME_GATEWAY_SESSIONS = shared_session_map("container")
 
 _RUNTIME_GATEWAY_LOCK = (
     threading.Lock()
@@ -217,6 +228,7 @@ def _hash_gateway_secret(
 
 def _issue_runtime_gateway_url(
     *,
+    db: Session,
     request: Request,
     current_user: User,
     tenant: Tenant,
@@ -256,6 +268,8 @@ def _issue_runtime_gateway_url(
 
             "instance_id":
                 instance_id,
+
+            "launch_epoch": get_runtime_launch_epoch(db, tenant.id, application.id),
 
             # The launch ticket becomes the HttpOnly gateway
             # cookie after the one-time URL exchange. Only its
@@ -535,6 +549,10 @@ def _get_runtime_gateway_context(
             status_code=403,
             detail=str(error),
         ) from error
+
+    require_runtime_launch_allowed(db, tenant.id, application.id)
+    if int(session.get("launch_epoch", -1)) != get_runtime_launch_epoch(db, tenant.id, application.id):
+        raise HTTPException(status_code=403, detail="Runtime gateway session was revoked by an application stop.")
 
     instance = db.get(
         ApplicationInstance,
@@ -836,9 +854,12 @@ async def _proxy_runtime_gateway_request(
             )
 
             if valid_ticket:
-                session[
-                    "ticket_used"
-                ] = True
+                if isinstance(_RUNTIME_GATEWAY_SESSIONS, RedisSessionMap):
+                    valid_ticket = _RUNTIME_GATEWAY_SESSIONS.consume_ticket(
+                        gateway_id, expected_hash=_hash_gateway_secret(ticket), now=now,
+                    )
+                else:
+                    session["ticket_used"] = True
 
         if not valid_ticket:
             raise HTTPException(
@@ -964,30 +985,14 @@ async def _proxy_runtime_gateway_request(
 
     outgoing_headers = {}
 
-    excluded_request_headers = (
-        _RUNTIME_GATEWAY_HOP_HEADERS
-        | {
-            "host",
-            "cookie",
-            "authorization",
-            "content-length",
-            "accept-encoding",
-        }
-    )
-
-    for key, value in (
-        request.headers.items()
-    ):
-
-        if (
-            key.lower()
-            in excluded_request_headers
+    # Never forward caller-controlled AUGMIS identity or assertion headers.
+    # Keep ordinary request headers for existing applications.
+    for key, value in request.headers.items():
+        if not should_forward_request_header(
+            key, _RUNTIME_GATEWAY_HOP_HEADERS
         ):
             continue
-
-        outgoing_headers[
-            key
-        ] = value
+        outgoing_headers[key] = value
 
     outgoing_headers[
         "Accept-Encoding"
@@ -1016,6 +1021,22 @@ async def _proxy_runtime_gateway_request(
             "instance"
         ].id
     )
+
+    # Opt-in pilot: revalidated gateway context is the ONLY claims source.
+    # For other AAPS apps this returns None and changes no behavior.
+    try:
+        assertion = make_dashboard_request_assertion(
+            context=context,
+            method=request.method,
+            relative_path=str(path or "").lstrip("/"),
+        )
+    except AssertionIssuanceError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail="Dashboard runtime authorization unavailable.",
+        ) from error
+    if assertion is not None:
+        outgoing_headers[ASSERTION_HEADER] = assertion
 
     port = (
         parsed_runtime.port
@@ -1116,14 +1137,8 @@ async def _proxy_runtime_gateway_request(
             key.lower()
         )
 
-        if (
-            lower_key
-            in _RUNTIME_GATEWAY_HOP_HEADERS
-            or lower_key
-            in {
-                "content-length",
-                "set-cookie",
-            }
+        if not should_forward_response_header(
+            key, _RUNTIME_GATEWAY_HOP_HEADERS
         ):
             continue
 
@@ -1218,513 +1233,23 @@ def upgrade_application_instance(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-
-    # =====================================================
-    # 1. LOAD INSTANCE
-    # =====================================================
-
-    instance = db.scalar(
-        select(ApplicationInstance)
-        .where(ApplicationInstance.id == instance_id)
-        .with_for_update()
-    )
-
+    # The HTTP route keeps authoritative user authorization; the trusted
+    # auto-upgrade worker calls the shared service without impersonating a user.
+    instance = db.get(ApplicationInstance, instance_id)
     if not instance:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Instance not found",
-        )
-
-    if instance.status != "running":
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Only a running instance "
-                "can be upgraded."
-            ),
-        )
-
-    # =====================================================
-    # 2. RBAC
-    # =====================================================
-
+        raise HTTPException(status_code=404, detail="Instance not found")
     try:
-
-        require_tenant_permission(
-            db=db,
-            user=current_user,
-            tenant_id=instance.tenant_id,
-            permission_code="application.deploy",
-        )
-
+        require_tenant_permission(db=db, user=current_user,
+                                  tenant_id=instance.tenant_id,
+                                  permission_code="application.deploy")
     except AuthorizationError as error:
-
-        raise HTTPException(
-            status_code=403,
-            detail=str(error),
-        ) from error
-
-    # =====================================================
-    # 3. LOAD CURRENT + TARGET VERSION
-    # =====================================================
-
-    current_version = db.get(
-        ApplicationVersion,
-        instance.active_version_id,
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    require_runtime_launch_allowed(db, instance.tenant_id, instance.application_id)
+    from services.api.app.services.runtime_upgrade_executor import perform_instance_upgrade
+    return perform_instance_upgrade(
+        db=db, instance_id=instance_id, target_version_id=payload.target_version_id,
+        actor_user_id=current_user.id, system_actor=False,
     )
-
-    if not current_version:
-
-        raise HTTPException(
-            status_code=409,
-            detail="Current application version not found",
-        )
-
-    target_version = db.get(
-        ApplicationVersion,
-        payload.target_version_id,
-    )
-
-    if not target_version:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Target application version not found",
-        )
-
-    if (
-        target_version.application_id
-        != instance.application_id
-    ):
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Target version belongs to "
-                "another application."
-            ),
-        )
-
-    if target_version.status != "image_ready":
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Target application version "
-                "is not image_ready."
-            ),
-        )
-
-    if target_version.id == current_version.id:
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Instance is already running "
-                "the requested version."
-            ),
-        )
-
-    # =====================================================
-    # 4. COMMERCIAL AUTHORIZATION
-    # =====================================================
-
-    try:
-
-        subscription = require_active_subscription(
-            db=db,
-            tenant_id=instance.tenant_id,
-            application_id=instance.application_id,
-        )
-
-        require_active_entitlement(
-            db=db,
-            tenant_id=instance.tenant_id,
-            application_id=instance.application_id,
-            entitlement_code="application.deploy",
-        )
-
-        require_subscription_version_allowed(
-            db=db,
-            subscription=subscription,
-            target_version=target_version,
-        )
-
-    except (
-        EntitlementError,
-        VersionPolicyError,
-    ) as error:
-
-        raise HTTPException(
-            status_code=403,
-            detail=str(error),
-        ) from error
-
-    # =====================================================
-    # 5. TARGET BUILD
-    # =====================================================
-
-    target_build = db.scalar(
-        select(ApplicationBuild)
-        .where(
-            ApplicationBuild.application_version_id
-            == target_version.id,
-
-            ApplicationBuild.status
-            == "ready",
-        )
-        .order_by(
-            ApplicationBuild.created_at.desc(),
-        )
-    )
-
-    if not target_build:
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "No ready build found "
-                "for target version."
-            ),
-        )
-
-    if not target_build.image_ref:
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Target build has no image reference."
-            ),
-        )
-
-    # =====================================================
-    # 6. CURRENT RUNNING DEPLOYMENT
-    # =====================================================
-
-    current_deployment = db.scalar(
-        select(ApplicationDeployment)
-        .where(
-            ApplicationDeployment.instance_id
-            == instance.id,
-
-            ApplicationDeployment.status
-            == "running",
-        )
-        .order_by(
-            ApplicationDeployment.created_at.desc(),
-        )
-    )
-
-    if not current_deployment:
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Instance has no running deployment."
-            ),
-        )
-
-    if not current_deployment.container_name:
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Current deployment has no container."
-            ),
-        )
-
-    # Prevent overlapping upgrade operations.
-
-    existing_candidate = db.scalar(
-        select(ApplicationDeployment)
-        .where(
-            ApplicationDeployment.instance_id
-            == instance.id,
-
-            ApplicationDeployment.status
-            == "deploying",
-        )
-    )
-
-    if existing_candidate:
-
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "An upgrade/deployment is already "
-                "in progress for this instance."
-            ),
-        )
-
-    # =====================================================
-    # 7. CREATE CANDIDATE DEPLOYMENT
-    # =====================================================
-
-    short_id = uuid.uuid4().hex[:8]
-
-    candidate_name = safe_name(
-        f"augmis-upgrade-"
-        f"{instance.instance_key}-"
-        f"{short_id}"
-    )
-
-    candidate = ApplicationDeployment(
-        instance_id=instance.id,
-        application_version_id=target_version.id,
-        build_id=target_build.id,
-        status="deploying",
-        container_name=candidate_name,
-        health_status="starting",
-    )
-
-    db.add(candidate)
-
-    instance.status = "upgrading"
-
-    db.commit()
-
-    db.refresh(candidate)
-
-    # =====================================================
-    # 8. START CANDIDATE CONTAINER
-    #
-    # OLD CONTAINER REMAINS RUNNING.
-    # =====================================================
-
-    try:
-
-        result = start_container(
-            image_ref=target_build.image_ref,
-            manifest=target_version.manifest,
-            container_name=candidate_name,
-            labels={
-                "augmis.managed": "true",
-
-                "augmis.instance_id":
-                    str(instance.id),
-
-                "augmis.tenant_id":
-                    str(instance.tenant_id),
-
-                "augmis.application_id":
-                    str(instance.application_id),
-
-                "augmis.upgrade_candidate":
-                    "true",
-            },
-        )
-
-    except DeploymentError as error:
-
-        # Candidate failed.
-        # Old deployment was never stopped.
-
-        candidate.status = "failed"
-        candidate.health_status = "unhealthy"
-        candidate.error_message = str(error)
-        archive_failed_start(candidate, error)
-
-        instance.status = "running"
-
-        db.commit()
-
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message":
-                    "Upgrade candidate failed health check",
-
-                "candidateDeploymentId":
-                    str(candidate.id),
-
-                "error":
-                    str(error),
-
-                "rollback":
-                    "Previous deployment remains running",
-            },
-        ) from error
-
-    # B1A: persist the healthy candidate reference before deleting the old
-    # container. A crash now leaves enough DB metadata to reconcile safely.
-    candidate.container_id = result["container_id"]
-    candidate.container_name = result["container_name"]
-    candidate.host_port = result["host_port"]
-    candidate.runtime_url = result["runtime_url"]
-    candidate.health_status = "healthy"
-    db.commit()
-
-    # Snapshot outgoing logs before their Docker container is deleted.
-    archive_before_removal(current_deployment)
-    db.commit()
-
-    # =====================================================
-    # 9. CANDIDATE IS HEALTHY
-    #
-    # NOW retire old container.
-    # =====================================================
-
-    try:
-
-        stop_container(
-            current_deployment.container_name,
-        )
-
-    except DeploymentError as error:
-
-        # Old runtime could not be retired.
-        # Remove the candidate and preserve the old runtime.
-        archive_before_removal(candidate)
-        db.commit()
-
-        try:
-
-            stop_container(
-                result["container_name"],
-            )
-
-        except DeploymentError:
-            pass
-
-        candidate.status = "failed"
-        candidate.health_status = "stopped"
-
-        candidate.error_message = (
-            "Candidate was healthy but previous "
-            f"deployment could not be stopped: {error}"
-        )
-
-        instance.status = "running"
-
-        db.commit()
-
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "message":
-                    "Upgrade promotion failed",
-
-                "error":
-                    str(error),
-
-                "rollback":
-                    "Previous deployment remains active",
-            },
-        ) from error
-
-    now = datetime.now(
-        timezone.utc
-    )
-
-    # =====================================================
-    # 10. RETIRE OLD DEPLOYMENT
-    # =====================================================
-
-    current_deployment.status = "stopped"
-    current_deployment.health_status = "stopped"
-    current_deployment.stopped_at = now
-
-    # =====================================================
-    # 11. PROMOTE CANDIDATE
-    # =====================================================
-
-    candidate.container_id = (
-        result["container_id"]
-    )
-
-    candidate.container_name = (
-        result["container_name"]
-    )
-
-    candidate.host_port = (
-        result["host_port"]
-    )
-
-    candidate.runtime_url = (
-        result["runtime_url"]
-    )
-
-    candidate.status = "running"
-    candidate.health_status = "healthy"
-    candidate.deployed_at = now
-
-    # Logical instance now points to new version.
-
-    instance.active_version_id = target_version.id
-    instance.status = "running"
-
-    record_audit_event(
-        db,
-        action="application.upgrade",
-        resource_type="application_instance",
-        resource_id=instance.id,
-        actor_user_id=current_user.id,
-        tenant_id=instance.tenant_id,
-        outcome="success",
-        message="Application instance upgraded successfully.",
-        metadata={
-        "deploymentId":
-            str(candidate.id),
-
-        "fromVersionId":
-            str(current_version.id),
-
-        "fromVersion":
-            current_version.version,
-
-        "toVersionId":
-            str(target_version.id),
-
-        "toVersion":
-            target_version.version,
-
-        "containerName":
-            candidate.container_name,
-        },
-    )
-
-    db.commit()
-
-    return {
-        "status": "UPGRADED",
-
-        "instance": {
-            "id": str(instance.id),
-            "name": instance.name,
-            "status": instance.status,
-        },
-
-        "previousVersion": {
-            "id": str(current_version.id),
-            "version": current_version.version,
-        },
-
-        "activeVersion": {
-            "id": str(target_version.id),
-            "version": target_version.version,
-        },
-
-        "deployment": {
-            "id": str(candidate.id),
-
-            "containerId":
-                candidate.container_id,
-
-            "containerName":
-                candidate.container_name,
-
-            "hostPort":
-                candidate.host_port,
-
-            "url":
-                candidate.runtime_url,
-
-            "health":
-                candidate.health_status,
-        },
-    }
 
 
 @router.post(
@@ -1857,6 +1382,10 @@ def deploy_application(
             detail=str(error),
         ) from error
 
+    acquire_instance_limit_lock(db=db, tenant_id=tenant.id,
+                                application_id=application.id)
+    require_runtime_launch_allowed(db, tenant.id, application.id)
+
     # =====================================================
     # 5. INSTANCE LIMIT
     #
@@ -1878,6 +1407,8 @@ def deploy_application(
             status_code=409,
             detail=str(error),
         ) from error
+
+    require_runtime_launch_allowed(db, tenant.id, application.id)
 
     # =====================================================
     # 6. READY BUILD
@@ -1977,8 +1508,8 @@ def deploy_application(
 
     try:
 
-        result = start_container(
-            image_ref=build.image_ref,
+        result = start_scoped_container(
+            db=db, instance=instance, deployment=deployment, build=build,
             manifest=version.manifest,
             container_name=container_name,
             labels={
@@ -2011,6 +1542,17 @@ def deploy_application(
         archive_failed_start(deployment, error)
 
         db.commit()
+
+        # Stable, user-safe quota error; preserve other deployment errors.
+        if "tenant runtime container quota exceeded" in str(error).lower():
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "TENANT_CONTAINER_QUOTA_EXCEEDED",
+                    "message": "The tenant's concurrent-container quota has been reached.",
+                    "deploymentId": str(deployment.id),
+                },
+            ) from error
 
         raise HTTPException(
             status_code=422,
@@ -2253,6 +1795,9 @@ def open_containerized_application(
         application_id=application.id,
     )
 
+    # An operator Stop overrides both reuse and first-time provisioning.
+    require_runtime_launch_allowed(db, tenant.id, application.id)
+
     # =====================================================
     # 5. REUSE EXISTING RUNNING INSTANCE
     # =====================================================
@@ -2339,6 +1884,7 @@ def open_containerized_application(
             )
 
         gateway_url = _issue_runtime_gateway_url(
+            db=db,
             request=request,
             current_user=current_user,
             tenant=tenant,
@@ -2492,6 +2038,7 @@ def open_containerized_application(
         )
 
     gateway_url = _issue_runtime_gateway_url(
+    db=db,
     request=request,
     current_user=current_user,
     tenant=tenant,
@@ -3148,8 +2695,8 @@ def rollback_application_instance(
 
     try:
 
-        result = start_container(
-            image_ref=rollback_build.image_ref,
+        result = start_scoped_container(
+            db=db, instance=instance, deployment=candidate, build=rollback_build,
             manifest=rollback_version.manifest,
             container_name=candidate_name,
             labels={
@@ -3392,181 +2939,97 @@ def rollback_application_instance(
 # STOP APPLICATION INSTANCE
 # =========================================================
 
-@router.post(
-    "/instances/{instance_id}/stop",
-)
+@router.post("/instances/{instance_id}/stop")
 def stop_application_instance(
     instance_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-
-    # =====================================================
-    # 1. LOAD INSTANCE
-    # =====================================================
-
-    instance = db.scalar(
-        select(ApplicationInstance)
-        .where(ApplicationInstance.id == instance_id)
-        .with_for_update()
-    )
-
-    if not instance:
-
-        raise HTTPException(
-            status_code=404,
-            detail="Instance not found",
-        )
-
-    # =====================================================
-    # 2. RBAC
-    #
-    # Stop must remain possible even when a subscription
-    # is suspended/cancelled.
-    # =====================================================
-
+    """Operator Stop: block launches first, then stop ALL running copies for this app."""
+    requested = db.get(ApplicationInstance, instance_id)
+    if not requested:
+        raise HTTPException(status_code=404, detail="Instance not found")
     try:
-
-        require_tenant_permission(
-            db=db,
-            user=current_user,
-            tenant_id=instance.tenant_id,
-            permission_code="application.instance.stop",
-        )
-
+        require_tenant_permission(db=db, user=current_user,
+                                  tenant_id=requested.tenant_id,
+                                  permission_code="application.instance.stop")
     except AuthorizationError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
 
-        raise HTTPException(
-            status_code=403,
-            detail=str(error),
-        ) from error
+    # Consistent lock ordering with Open Application and Start.
+    acquire_instance_limit_lock(db=db, tenant_id=requested.tenant_id,
+                                application_id=requested.application_id)
+    active = list(db.scalars(select(ApplicationInstance).where(
+        ApplicationInstance.tenant_id == requested.tenant_id,
+        ApplicationInstance.application_id == requested.application_id,
+        ApplicationInstance.status.in_(("running", "provisioning", "upgrading", "stopping")),
+    ).order_by(ApplicationInstance.id).with_for_update()))
 
-    if instance.status not in ("running", "stopped"):
-        raise HTTPException(
-            status_code=409,
-            detail="Instance lifecycle operation is already in progress.",
-        )
+    if any(i.status != "running" for i in active):
+        raise HTTPException(status_code=409, detail=(
+            "An application lifecycle operation is in progress. Wait for it to finish, then stop the application."
+        ))
 
-    # =====================================================
-    # 3. FIND RUNNING DEPLOYMENT
-    # =====================================================
+    targets = []
+    for instance in active:
+        deployment = db.scalar(select(ApplicationDeployment).where(
+            ApplicationDeployment.instance_id == instance.id,
+            ApplicationDeployment.status == "running",
+        ).order_by(ApplicationDeployment.created_at.desc()))
+        if not deployment or not deployment.container_name:
+            raise HTTPException(status_code=409, detail=(
+                "An active instance has no valid running deployment. Resolve its runtime state before stopping."
+            ))
+        targets.append((instance, deployment))
 
-    deployment = db.scalar(
-        select(ApplicationDeployment)
-        .where(
-            ApplicationDeployment.instance_id
-            == instance.id,
-
-            ApplicationDeployment.status
-            == "running",
-        )
-        .order_by(
-            ApplicationDeployment.created_at.desc()
-        )
-    )
-
-    if not deployment:
-
-        # Make stop idempotent for an already stopped
-        # logical instance.
-
-        if instance.status == "stopped":
-
-            return {
-                "status": "STOPPED",
-                "instanceId": str(instance.id),
-            }
-
-        raise HTTPException(
-            status_code=409,
-            detail="No running deployment found.",
-        )
-
-    if not deployment.container_name:
-
-        raise HTTPException(
-            status_code=409,
-            detail="Deployment has no container.",
-        )
-
-    # Record the intent and logs before destructive Docker removal.
-    archive_before_removal(deployment)
-    instance.status = "stopping"
+    # Fail closed. Existing launch tickets/sessions and new Open calls are now denied.
+    # A failed Docker stop MUST NOT automatically re-enable launches.
+    set_runtime_desired_state(db, requested.tenant_id, requested.application_id,
+                              "stopped", current_user.id)
+    for instance, _ in targets:
+        instance.status = "stopping"
     db.commit()
 
-    # =====================================================
-    # 4. STOP CONTAINER
-    # =====================================================
-
-    try:
-
-        stop_container(
-            deployment.container_name,
-        )
-
-    except DeploymentError as error:
-        instance.status = "running"
+    stopped = []
+    failures = []
+    for instance, deployment in targets:
+        try:
+            archive_before_removal(deployment)
+            stop_container(deployment.container_name)
+        except Exception as error:  # fail closed; report partial Docker/log archival errors
+            instance.status = "running"  # Operator gate remains closed.
+            failures.append(str(instance.id))
+            db.commit()
+            continue
+        deployment.status = "stopped"
+        deployment.health_status = "stopped"
+        deployment.stopped_at = datetime.now(timezone.utc)
+        instance.status = "stopped"
+        stopped.append(str(instance.id))
         db.commit()
-        raise HTTPException(
-            status_code=422,
-            detail=str(error),
-        ) from error
-
-    now = datetime.now(
-        timezone.utc
-    )
-
-    # =====================================================
-    # 5. UPDATE CONTROL-PLANE STATE
-    # =====================================================
-
-    deployment.status = "stopped"
-
-    deployment.health_status = "stopped"
-
-    deployment.stopped_at = now
-
-    instance.status = "stopped"
 
     record_audit_event(
-        db,
-        action="application.stop",
-        resource_type="application_instance",
-        resource_id=instance.id,
-        actor_user_id=current_user.id,
-        tenant_id=instance.tenant_id,
-        outcome="success",
-        message="Application instance stopped successfully.",
-        metadata={
-            "deploymentId":
-                str(deployment.id),
-
-            "versionId":
-                str(instance.active_version_id),
-
-            "containerName":
-                deployment.container_name,
-        },
+        db, action="application.stop", resource_type="application_instance",
+        resource_id=requested.id, actor_user_id=current_user.id,
+        tenant_id=requested.tenant_id,
+        outcome="failure" if failures else "success",
+        message="Tenant application stopped by administrator." if not failures
+                else "Operator launch gate closed; one or more containers could not be stopped.",
+        metadata={"applicationId": str(requested.application_id),
+                  "stoppedInstanceIds": stopped, "failedInstanceIds": failures},
     )
-
     db.commit()
-
-    return {
-        "status": "STOPPED",
-
-        "instanceId":
-            str(instance.id),
-
-        "deploymentId":
-            str(deployment.id),
-
-        "stoppedAt":
-            deployment.stopped_at,
-    }
+    if failures:
+        raise HTTPException(status_code=502, detail={
+            "code": "APPLICATION_STOP_PARTIAL",
+            "message": "Application access is stopped, but some containers could not be stopped. Retry Stop or inspect runtime logs.",
+        })
+    return {"status": "STOPPED", "applicationId": str(requested.application_id),
+            "stoppedInstanceIds": stopped, "launchAllowed": False}
 
 
-    # =========================================================
-# RESTART APPLICATION INSTANCE
+# =========================================================
+# START (existing restart endpoint retained for API compatibility)
 # =========================================================
 
 @router.post(
@@ -3582,14 +3045,13 @@ def restart_application_instance(
     # 1. LOAD + LOCK INSTANCE
     # =====================================================
 
-    instance = db.scalar(
-        select(ApplicationInstance)
-        .where(
-            ApplicationInstance.id
-            == instance_id
-        )
-        .with_for_update()
-    )
+    instance = db.get(ApplicationInstance, instance_id)
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    acquire_instance_limit_lock(db=db, tenant_id=instance.tenant_id,
+                                application_id=instance.application_id)
+    instance = db.scalar(select(ApplicationInstance)
+                         .where(ApplicationInstance.id == instance_id).with_for_update())
 
     if not instance:
 
@@ -3819,8 +3281,8 @@ def restart_application_instance(
 
     try:
 
-        result = start_container(
-            image_ref=build.image_ref,
+        result = start_scoped_container(
+            db=db, instance=instance, deployment=deployment, build=build,
             manifest=version.manifest,
             container_name=container_name,
             labels={
@@ -3897,6 +3359,8 @@ def restart_application_instance(
     deployment.deployed_at = now
 
     instance.status = "running"
+    set_runtime_desired_state(db, instance.tenant_id, instance.application_id,
+                              "running", current_user.id)
 
     record_audit_event(
         db,

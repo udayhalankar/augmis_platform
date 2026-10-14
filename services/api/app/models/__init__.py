@@ -1,3 +1,5 @@
+from services.api.app.models.techtango_integration import TechtangoTenantLink
+
 from services.api.app.models.platform import (
     Application,
     ApplicationBuild,

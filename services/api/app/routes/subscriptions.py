@@ -62,6 +62,7 @@ from services.api.app.models.platform import (
     ApplicationPackage,
     ApplicationVersion,
     Tenant,
+    TenantApplicationRuntimeControl,
 )
 
 from services.api.app.schemas.subscription import (
@@ -113,10 +114,9 @@ _STATIC_RUNTIME_SESSION_SECONDS = (
 
 _STATIC_RUNTIME_TICKET_SECONDS = 60
 
-_STATIC_RUNTIME_SESSIONS: dict[
-    str,
-    dict,
-] = {}
+from services.api.app.services.shared_runtime_sessions import RedisSessionMap, shared_session_map
+
+_STATIC_RUNTIME_SESSIONS = shared_session_map("static")
 
 _STATIC_RUNTIME_LOCK = (
     threading.Lock()
@@ -830,33 +830,7 @@ def _validate_static_runtime_session(
             ),
         )
 
-    print(
-        "[AUGMIS BACKEND RUNTIME COOKIE]",
-        {
-            "runtime_id": runtime_id,
-            "cookie_present": bool(cookie_secret),
-            "cookie_length": len(cookie_secret or ""),
-            "session_exists": bool(session),
-            "expected_hash_present": bool(
-                session.get("session_hash")
-            ) if session else False,
-            "cookie_hash_matches": (
-                bool(cookie_secret)
-                and bool(session)
-                and secrets.compare_digest(
-                    _static_runtime_hash(
-                        cookie_secret
-                    ),
-                    str(
-                        session.get(
-                            "session_hash",
-                            "",
-                        )
-                    ),
-                )
-            ),
-        },
-    )
+    # Do not log gateway session or cookie metadata.
 
     if (
         not cookie_secret
@@ -2192,6 +2166,13 @@ def list_tenant_available_applications(
         )
     ).all()
 
+    controls = {
+        control.application_id: control.desired_state
+        for control in db.scalars(select(TenantApplicationRuntimeControl).where(
+            TenantApplicationRuntimeControl.tenant_id == tenant.id,
+        ))
+    }
+
     items = []
 
     for (
@@ -2336,6 +2317,12 @@ def list_tenant_available_applications(
 
                 "runtimeReady":
                     runtime_ready,
+
+                # Static applications are not tied to the Docker stop gate.
+                "runtimeState": (
+                    "available" if build_type == "static_web"
+                    else controls.get(application.id, "running")
+                ),
             }
         )
 

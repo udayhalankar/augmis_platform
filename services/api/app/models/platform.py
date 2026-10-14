@@ -12,7 +12,7 @@ from sqlalchemy import (
     func
 )
 
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from services.api.app.db.base import Base
@@ -335,6 +335,8 @@ class ApplicationBuild(Base):
         nullable=True
     )
 
+    immutable_image_id: Mapped[str | None] = mapped_column(String(90), nullable=True)
+
     build_log: Mapped[str | None] = mapped_column(
         Text,
         nullable=True
@@ -457,6 +459,31 @@ class ApplicationInstance(Base):
     )
 
 
+
+class TenantApplicationRuntimeControl(Base):
+    """Tenant-specific operator stop gate; independent of any one instance."""
+    __tablename__ = "tenant_application_runtime_controls"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True,
+    )
+    application_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), primary_key=True,
+    )
+    desired_state: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="running",
+    )
+    launch_epoch: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default="0", default=0,
+    )
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("iam_users.id", ondelete="SET NULL"), nullable=True,
+    )
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now(),
+    )
+
+
 class ApplicationDeployment(Base):
 
     __tablename__ = "application_deployments"
@@ -523,6 +550,10 @@ class ApplicationDeployment(Base):
         nullable=True
     )
 
+    deployed_image_id: Mapped[str | None] = mapped_column(String(90), nullable=True)
+    config_revision: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    config_snapshot_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
     health_status: Mapped[str | None] = mapped_column(
         String(30),
         nullable=True
@@ -562,3 +593,6 @@ class ApplicationDeployment(Base):
         nullable=False,
         server_default=func.now()
     )
+
+
+from services.api.app.models import runtime_control as _runtime_control_models  # noqa: E402,F401

@@ -45,26 +45,33 @@ import {
 } from "@/lib/runtime-gateway";
 
 
-function apiError(
-  error: unknown,
-  fallback: string
-): string {
+function apiError(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
-    const detail =
-      error.response?.data?.detail;
-
-    if (typeof detail === "string") {
-      return detail;
+    const detail: unknown = error.response?.data?.detail;
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const item = detail as Record<string, unknown>;
+      const code = typeof item.code === "string" ? item.code : "";
+      const reason = typeof item.error === "string" ? item.error : "";
+      const message = typeof item.message === "string" ? item.message : "";
+      if (code === "APPLICATION_STOPPED") {
+        return "Application is currently stopped. Contact your administrator to start the application.";
+      }
+      if (code === "TENANT_CONTAINER_QUOTA_EXCEEDED" ||
+          /tenant runtime container quota exceeded/i.test(reason) ||
+          /tenant runtime container quota exceeded/i.test(message)) {
+        return "Container limit reached. Your organization has no free container slots. Stop another running application from Runtime Control or ask an administrator to increase the quota. Your subscription remains active.";
+      }
+      // Prefer the user-safe message from structured API errors, not raw runtime/Docker details.
+      if (message) return message;
     }
+    if (typeof detail === "string") return detail;
+    if (error.response?.status === 403) return "You are not authorized to launch this application for the selected tenant.";
+    if (error.response?.status === 422) return "The application could not be launched. Check runtime availability or contact your platform administrator.";
+    if (error.response?.status === 409) return "The application cannot be launched in its current state. Refresh and try again.";
+    if (error.response?.status === 503) return "The runtime service is currently unavailable. Try again shortly.";
   }
-
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return fallback;
+  return error instanceof Error ? error.message : fallback;
 }
-
 
 function formatStatus(
   value: string
@@ -268,6 +275,10 @@ export default function TenantApplicationsPage() {
     async (
       item: TenantAvailableApplication
     ) => {
+      if (item.version.buildType !== "static_web" && item.runtimeState === "stopped") {
+        setError("Application is currently stopped. Contact your administrator to start the application.");
+        return;
+      }
       if (!item.runtimeReady) {
         setError(
           "This application version is not runtime-ready."
@@ -399,6 +410,8 @@ export default function TenantApplicationsPage() {
         }
       } catch (openError) {
         runtimeWindow.close();
+        // Refresh stale catalog state if another administrator stopped the app.
+        void loadCatalog(cleanTenantId);
 
         setError(
           apiError(
@@ -606,6 +619,13 @@ export default function TenantApplicationsPage() {
               }}
             >
               {error}
+              {error.startsWith("Container limit reached.") && (
+                <Box sx={{mt:1.5}}>
+                  <Button size="small" variant="outlined" href="/runtime-control">
+                    Manage running instances
+                  </Button>
+                </Box>
+              )}
             </Alert>
           )}
 
@@ -869,14 +889,14 @@ export default function TenantApplicationsPage() {
                         <Chip
                           size="small"
                           label={
-                            item.runtimeReady
-                              ? "Available"
-                              : "Not Ready"
+                             item.version.buildType !== "static_web" && item.runtimeState === "stopped"
+                               ? "Stopped"
+                               : item.runtimeReady ? "Available" : "Not Ready"
                           }
                           color={
-                            item.runtimeReady
-                              ? "success"
-                              : "warning"
+                             item.version.buildType !== "static_web" && item.runtimeState === "stopped"
+                               ? "error"
+                               : item.runtimeReady ? "success" : "warning"
                           }
                           variant="outlined"
                         />
@@ -968,6 +988,12 @@ export default function TenantApplicationsPage() {
                     </Box>
 
 
+                    {item.version.buildType !== "static_web" && item.runtimeState === "stopped" && (
+                       <Alert severity="warning" sx={{mx:2.5,mb:1.5}}>
+                         Application is currently stopped. Contact your administrator to start the application.
+                       </Alert>
+                     )}
+
                     {/* CARD ACTION */}
                     <Box
                       sx={{
@@ -988,8 +1014,9 @@ export default function TenantApplicationsPage() {
                         size="small"
                         variant="contained"
                         disabled={
-                          !item.runtimeReady ||
-                          Boolean(
+                           !item.runtimeReady ||
+                           (item.version.buildType !== "static_web" && item.runtimeState === "stopped") ||
+                           Boolean(
                             openingSubscriptionId
                           )
                         }

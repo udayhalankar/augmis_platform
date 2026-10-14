@@ -6,6 +6,8 @@ import time
 import urllib.error
 import urllib.request
 
+from services.api.app.services.dashboard_runtime_mounts import DashboardPilotLaunch
+
 
 class DeploymentError(Exception):
     def __init__(self, message: str, *, log_snapshot: str | None = None):
@@ -138,7 +140,9 @@ def start_container(
     image_ref: str,
     manifest: dict,
     container_name: str,
-    labels: dict[str, str]
+    labels: dict[str, str],
+    environment: dict[str, str] | None = None,
+    pilot_runtime: DashboardPilotLaunch | None = None,
 ) -> dict:
 
     service_name, service = (
@@ -160,7 +164,30 @@ def start_container(
         "--memory-swap", memory_limit,
         "--cpus", cpu_limit,
         "--pids-limit", pid_limit,
+        "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true",
     ]
+
+    # Only this explicitly approved image may obtain read-only secret mounts.
+    # The configured network must already be an internal Docker network.
+    if pilot_runtime is not None:
+        command.extend([
+            "--network", pilot_runtime.private_network,
+            "--read-only",
+            "--user", "10001:10001",
+            "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m",
+        ])
+        for source, target in pilot_runtime.secret_mounts:
+            command.extend([
+                "--mount",
+                f"type=bind,source={source},target={target},readonly",
+            ])
+        for key, value in pilot_runtime.environment.items():
+            command.extend(["--env", f"{key}={value}"])
+
+    # Non-secret variables only. Never pass credentials through this API.
+    for key, value in (environment or {}).items():
+        command.extend(["--env", f"{key}={value}"])
 
     for key, value in labels.items():
 
