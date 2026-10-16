@@ -113,6 +113,11 @@ from services.api.app.services.version_policy_service import (
 )
 
 
+from services.api.app.services.dashboard_instance_reservation import (
+    is_two_phase_app, reserve_dashboard_instance, activate_reserved_dashboard,
+    cancel_reserved_dashboard,
+)
+
 router = APIRouter(
     prefix="/api/v1",
     tags=["Runtime"],
@@ -1252,6 +1257,45 @@ def upgrade_application_instance(
     )
 
 
+# B4 Pass 3H-5F: development-only, entitlement-gated two-phase pilot.
+# Requires explicit activation; never creates an offer or publishes a version.
+@router.post(
+    "/tenants/{tenant_id}/application-versions/{version_id}/reserve",
+    status_code=201,
+)
+def reserve_dashboard_instance_route(
+    tenant_id: uuid.UUID,
+    version_id: uuid.UUID,
+    payload: InstanceDeployRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return reserve_dashboard_instance(
+        db=db, tenant_id=tenant_id, version_id=version_id,
+        name=payload.name, user=current_user,
+    )
+
+
+@router.post("/instances/{instance_id}/activate-reserved")
+def activate_reserved_dashboard_route(
+    instance_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return activate_reserved_dashboard(db=db, instance_id=instance_id,
+                                       user=current_user)
+
+
+@router.post("/instances/{instance_id}/cancel-reservation")
+def cancel_reserved_dashboard_route(
+    instance_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return cancel_reserved_dashboard(db=db, instance_id=instance_id,
+                                     user=current_user)
+
+
 @router.post(
     "/tenants/{tenant_id}/application-versions/{version_id}/deploy",
     status_code=201,
@@ -1345,6 +1389,14 @@ def deploy_application(
         raise HTTPException(
             status_code=404,
             detail="Application not found",
+        )
+
+    # Never use the immediate-deploy path for the opt-in dashboard pilot.
+    # Keep normal applications unaffected and all entitlement checks intact.
+    if is_two_phase_app(application.id):
+        raise HTTPException(
+            status_code=409,
+            detail="Dashboard pilot requires reserve -> provision -> activate",
         )
 
     # =====================================================

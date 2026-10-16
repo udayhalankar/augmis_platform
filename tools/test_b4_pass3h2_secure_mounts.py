@@ -172,8 +172,13 @@ def test_image_must_use_nonroot_identity(monkeypatch, tmp_path):
 
 
 def test_no_password_in_docker_args_and_mounts_read_only(monkeypatch, tmp_path):
+    # B4 3H-5D replaces direct dashboard host publishing with a managed
+    # loopback-only companion. Preserve original secret-mount assertions.
     create_pilot(monkeypatch, tmp_path)
     spec = launch()
+    from services.api.app.services.dev_dashboard_ingress import DevRelay
+    monkeypatch.setattr(engine, 'require_dev_relay', lambda *a, **kw: DevRelay(
+        'augmis-dashboard-ingress', 'augmis-dashboard-private', IMAGE))
     calls = []
     def run(args, timeout=120):
         calls.append(args)
@@ -181,23 +186,28 @@ def test_no_password_in_docker_args_and_mounts_read_only(monkeypatch, tmp_path):
             return 'container-id'
         if args[:2] == ['docker', 'port']:
             return '127.0.0.1:49152'
-        raise AssertionError(args)
+        return ''
     monkeypatch.setattr(engine, 'run_docker', run)
     monkeypatch.setattr(engine, 'wait_for_health', lambda url, seconds: None)
+    monkeypatch.setattr(engine, '_dashboard_internal_health', lambda *a: None)
     manifest = {'services': {'dashboard': {'public': True, 'port': 8080, 'health': {'path':'/healthz'}}}}
     result = engine.start_container(
-        image_ref=IMAGE, manifest=manifest, container_name='test-container',
+        image_ref=IMAGE, manifest=manifest,
+        container_name='augmis-test-container',
         labels={'augmis.managed':'true'}, environment={'SAFE': 'yes'}, pilot_runtime=spec,
     )
-    argv = calls[0]
+    argv = [call for call in calls if call[:2] == ['docker', 'run']][0]
     assert result['host_port'] == 49152
     assert argv[argv.index('--network') + 1] == 'augmis-dashboard-private'
     assert '--read-only' in argv and '--user' in argv
     assert '--mount' in argv and sum('readonly' in x for x in argv) == 2
-    assert argv.count('--env') == 8  # 7 platform-set nonsecret + 1 user nonsecret
+    assert argv.count('--env') == 8  # 7 platform nonsecret + 1 nonsecret override
     assert PASSWORD not in str(argv)
     assert 'type=bind' in str(argv)
-    assert '-p' in argv and '127.0.0.1::8080' in argv
+    assert '-p' not in argv  # secure change: dashboard is never host published
+    relay = [call for call in calls if call[:2] == ['docker', 'run']][1]
+    assert '127.0.0.1::18080' in relay
+    assert PASSWORD not in str(relay)
 
 
 def test_existing_app_docker_command_unchanged(monkeypatch):
