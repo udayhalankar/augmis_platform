@@ -7,6 +7,10 @@ from sqlalchemy.orm import Session
 from services.api.app.models.platform import ApplicationBuild, ApplicationDeployment, ApplicationInstance, Tenant
 from services.api.app.models.runtime_control import RuntimeInstanceConfig, TenantRuntimeQuota
 from services.api.app.services.deployment_engine import DeploymentError, run_docker
+from services.api.app.services.private_crud_runtime import (
+    CrudRuntimeError, enabled_for, prepare_private_crud_runtime,
+)
+from services.api.app.models.runtime_control import ApplicationDatabaseResource
 from services.api.app.services.dashboard_runtime_mounts import (
     build_dashboard_pilot_launch, PilotLaunchError,
 )
@@ -95,6 +99,21 @@ def start_scoped_container(*, db: Session, instance: ApplicationInstance,
     """Enforce tenant quota, config snapshot and immutable image identity."""
     from services.api.app.services.deployment_engine import start_container
     try:
+        # C1-C: fail closed *before* allocation/launch. Unsupported database
+        # manifests must never enter the ordinary published-port Docker path.
+        # The existing C1-B4 CRUD runtime stays on its proven private path.
+        if (manifest.get("addons") or {}).get("database") is not None:
+            from services.api.app.services.aaps_deployment_contract import (
+                DeploymentContractError, fail_closed_if_unimplemented,
+            )
+            try:
+                fail_closed_if_unimplemented(
+                    manifest,
+                    legacy_crud=((manifest.get("metadata") or {}).get("id")
+                                 == "augmis-crud-reference"),
+                )
+            except DeploymentContractError as exc:
+                raise RuntimeControlError(str(exc)) from exc
         # Candidate's deployment row is already present. It reserves a quota
         # slot; do not add another slot in the count.
         surge_id = instance.id if (
@@ -105,6 +124,30 @@ def start_scoped_container(*, db: Session, instance: ApplicationInstance,
                          upgrade_instance_id=surge_id)
         revision, variables = get_runtime_config(db, instance)
         identity = pinned_image_identity(db, build)
+        # Existing instance-owned DBs may never silently fall back to a
+        # direct-host-published container during upgrade or rollback.
+        resource = db.scalar(select(ApplicationDatabaseResource).where(
+            ApplicationDatabaseResource.instance_id == instance.id))
+        protected_manifest = (manifest.get("metadata") or {}).get("id") == "augmis-crud-reference"
+        if resource is not None and not protected_manifest and not (manifest.get("addons") or {}).get("database", {}).get("schema"):
+            raise RuntimeControlError("Instance database requires private runtime")
+        if protected_manifest:
+            # Private runtime preparation includes reservation and trusted
+            # DB/role/schema checks; exceptions are converted to safe codes.
+            crud_runtime = prepare_private_crud_runtime(
+                db=db, instance=instance, manifest=manifest)
+            if crud_runtime is None:
+                raise RuntimeControlError("Private CRUD runtime unavailable")
+            protected = set(crud_runtime.environment)
+            if protected.intersection(variables):
+                raise RuntimeControlError("Runtime configuration overrides trusted identity")
+        elif (manifest.get("addons") or {}).get("database") is not None:
+            from services.api.app.services.aaps_generic_runtime import prepare_generic_private_runtime
+            crud_runtime = prepare_generic_private_runtime(db=db, instance=instance, manifest=manifest)
+            if set(crud_runtime.environment).intersection(variables):
+                raise RuntimeControlError("Runtime configuration overrides trusted identity")
+        else:
+            crud_runtime = None
         pilot_runtime = build_dashboard_pilot_launch(
             tenant_id=instance.tenant_id,
             application_id=instance.application_id,
@@ -115,8 +158,9 @@ def start_scoped_container(*, db: Session, instance: ApplicationInstance,
         deployment.config_snapshot_json = variables  # Never secret values.
         deployment.deployed_image_id = identity
         db.commit()  # Recovery data is durable before starting Docker.
-    except (RuntimeControlError, PilotLaunchError) as exc:
+    except (RuntimeControlError, PilotLaunchError, CrudRuntimeError) as exc:
         raise DeploymentError(str(exc)) from exc
     return start_container(image_ref=identity, manifest=manifest,
                            container_name=container_name, labels=labels,
-                           environment=variables, pilot_runtime=pilot_runtime)
+                            environment=variables, pilot_runtime=pilot_runtime,
+                            crud_runtime=crud_runtime)

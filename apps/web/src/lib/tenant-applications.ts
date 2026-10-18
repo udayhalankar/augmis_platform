@@ -2,6 +2,10 @@ import api from "@/lib/api";
 
 
 export type TenantAvailableApplication = {
+  latestPublishedVersion?: { id: string; version: string } | null;
+  promotableVersion?: { id: string; version: string } | null;
+  runningVersion?: string | null;
+  versionUpdateAvailable?: boolean;
   subscriptionId: string;
 
   tenant: {
@@ -118,4 +122,17 @@ export async function openTenantStaticApplication(
     );
 
   return response.data;
+}
+
+
+// C1-C4: uses existing authorized backend; never changes offers or records.
+export async function promoteTenantApplicationBaseline(
+  subscriptionId: string,
+  targetVersionId: string
+): Promise<{ status: string; version: string; baselineVersionId: string }> {
+  const result = await api.post(
+    `/api/v1/subscriptions/${subscriptionId}/promote-baseline`,
+    { target_version_id: targetVersionId }
+  );
+  return result.data;
 }

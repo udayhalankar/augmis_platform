@@ -19,3 +19,7 @@ class SubscriptionSuspendRequest(BaseModel):
 class SubscriptionChangeOfferRequest(BaseModel):
 
     offer_id: uuid.UUID
+
+class SubscriptionPromoteBaselineRequest(BaseModel):
+    target_version_id: uuid.UUID
+

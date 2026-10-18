@@ -1,15 +1,10 @@
-
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.augmis.com/aaps/v1alpha1/application.schema.json",
-
   "title": "AUGMIS Application Package Specification",
   "description": "AAPS v1alpha1 application manifest",
-
   "type": "object",
-
   "additionalProperties": false,
-
   "required": [
     "apiVersion",
     "kind",
@@ -17,72 +12,57 @@
     "runtime",
     "services"
   ],
-
   "properties": {
-
     "apiVersion": {
       "type": "string",
       "const": "apps.augmis.com/v1alpha1"
     },
-
     "kind": {
       "type": "string",
       "const": "Application"
     },
-
     "metadata": {
       "type": "object",
       "additionalProperties": false,
-
       "required": [
         "id",
         "name",
         "version"
       ],
-
       "properties": {
-
         "id": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$"
         },
-
         "name": {
           "type": "string",
           "minLength": 2,
           "maxLength": 100
         },
-
         "version": {
           "type": "string",
           "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
         },
-
         "description": {
           "type": "string",
           "maxLength": 2000
         }
       }
     },
-
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-
       "required": [
         "deploymentMode",
         "buildType"
       ],
-
       "properties": {
-
         "deploymentMode": {
           "type": "string",
           "enum": [
             "dedicated"
           ]
         },
-
         "buildType": {
           "type": "string",
           "enum": [
@@ -91,26 +71,20 @@
             "oci"
           ]
         },
-
         "context": {
           "type": "string"
         },
-
         "dockerfile": {
           "type": "string"
         },
-
         "composeFile": {
           "type": "string"
         },
-
         "image": {
           "type": "string"
         }
       },
-
       "allOf": [
-
         {
           "if": {
             "properties": {
@@ -119,7 +93,6 @@
               }
             }
           },
-
           "then": {
             "required": [
               "context",
@@ -127,7 +100,6 @@
             ]
           }
         },
-
         {
           "if": {
             "properties": {
@@ -136,14 +108,12 @@
               }
             }
           },
-
           "then": {
             "required": [
               "composeFile"
             ]
           }
         },
-
         {
           "if": {
             "properties": {
@@ -152,7 +122,6 @@
               }
             }
           },
-
           "then": {
             "required": [
               "image"
@@ -161,23 +130,17 @@
         }
       ]
     },
-
     "services": {
       "type": "object",
       "minProperties": 1,
-
       "additionalProperties": {
-
         "type": "object",
         "additionalProperties": false,
-
         "required": [
           "type",
           "port"
         ],
-
         "properties": {
-
           "type": {
             "type": "string",
             "enum": [
@@ -186,34 +149,26 @@
               "worker"
             ]
           },
-
           "port": {
             "type": "integer",
             "minimum": 1,
             "maximum": 65535
           },
-
           "public": {
             "type": "boolean",
             "default": false
           },
-
           "health": {
-
             "type": "object",
             "additionalProperties": false,
-
             "required": [
               "path"
             ],
-
             "properties": {
-
               "path": {
                 "type": "string",
                 "pattern": "^/"
               },
-
               "intervalSeconds": {
                 "type": "integer",
                 "minimum": 5,
@@ -221,18 +176,13 @@
               }
             }
           },
-
           "resources": {
-
             "type": "object",
             "additionalProperties": false,
-
             "properties": {
-
               "cpu": {
                 "type": "string"
               },
-
               "memory": {
                 "type": "string"
               }
@@ -241,25 +191,17 @@
         }
       }
     },
-
     "addons": {
-
       "type": "object",
       "additionalProperties": false,
-
       "properties": {
-
         "database": {
-
           "type": "object",
           "additionalProperties": false,
-
           "required": [
             "type"
           ],
-
           "properties": {
-
             "type": {
               "type": "string",
               "enum": [
@@ -267,26 +209,145 @@
                 "mysql"
               ]
             },
-
             "version": {
               "type": "string"
             },
-
             "storage": {
               "type": "string"
+            },
+            "migrations": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 24,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "path",
+                  "sha256"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "pattern": "^db/migrations/[A-Za-z0-9][A-Za-z0-9_.-]{0,120}\\.sql$"
+                  },
+                  "sha256": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            },
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "tables"
+              ],
+              "properties": {
+                "tables": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 8,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "columns"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_]{0,47}$"
+                      },
+                      "columns": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 32,
+                        "items": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "required": [
+                            "name",
+                            "type"
+                          ],
+                          "properties": {
+                            "name": {
+                              "type": "string",
+                              "pattern": "^[a-z][a-z0-9_]{0,47}$"
+                            },
+                            "type": {
+                              "type": "string",
+                              "enum": [
+                                "text",
+                                "integer",
+                                "numeric",
+                                "boolean",
+                                "date",
+                                "uuid",
+                                "timestamptz"
+                              ]
+                            },
+                            "maxLength": {
+                              "type": "integer",
+                              "minimum": 1,
+                              "maximum": 4000
+                            },
+                            "nullable": {
+                              "type": "boolean"
+                            },
+                            "default": {
+                              "type": "string",
+                              "maxLength": 100
+                            },
+                            "choices": {
+                              "type": "array",
+                              "maxItems": 16,
+                              "uniqueItems": true,
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 100
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "unique": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 4,
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "indexes": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             }
           }
         }
       }
     },
-
     "authentication": {
-
       "type": "object",
       "additionalProperties": false,
-
       "properties": {
-
         "type": {
           "type": "string",
           "enum": [
@@ -294,40 +355,74 @@
             "augmis_oidc"
           ]
         },
-
         "required": {
           "type": "boolean"
         }
       }
     },
-
     "permissions": {
-
       "type": "array",
-
       "items": {
         "type": "string",
         "pattern": "^[a-z0-9_.-]+$"
       },
-
       "uniqueItems": true
     },
-
     "lifecycle": {
-
       "type": "object",
       "additionalProperties": false,
-
       "properties": {
-
         "startupTimeoutSeconds": {
           "type": "integer",
           "minimum": 10,
           "maximum": 1800
         },
-
         "rollbackEnabled": {
           "type": "boolean"
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "routes"
+      ],
+      "properties": {
+        "routes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path",
+              "methods"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 5,
+                "maxLength": 128
+              },
+              "methods": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "PATCH",
+                    "DELETE"
+                  ]
+                }
+              }
+            }
+          }
         }
       }
     }

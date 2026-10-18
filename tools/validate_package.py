@@ -426,6 +426,31 @@ def validate_application_package(
             manifest
         )
 
+        # Hash-declared migration artifacts are checked at ingestion, never
+        # executed during upload/build. A publisher checksum is NOT approval.
+        from services.api.app.services.aaps_deployment_contract import (
+            migration_contract, route_contract, DeploymentContractError,
+        )
+        try:
+            declared = migration_contract(manifest)
+            route_contract(manifest)
+            from services.api.app.services.aaps_declarative_schema import read_declarative_schema, SchemaContractError
+            try:
+                compiled_schema = read_declarative_schema(manifest)
+            except SchemaContractError as exc:
+                raise DeploymentContractError(exc.code, "Invalid declarative schema") from exc
+            if declared and compiled_schema is not None:
+                raise DeploymentContractError("C1C_SCHEMA_MODE_CONFLICT", "Use one schema declaration mode")
+        except DeploymentContractError as exc:
+            raise PackageValidationError(str(exc)) from exc
+        for relative, expected in declared:
+            file_path = resolve_package_path(temp_path, relative)
+            if (not file_path.is_file() or file_path.is_symlink()
+                    or file_path.stat().st_size > 256 * 1024):
+                raise PackageValidationError('AAPS_MIGRATION_FILE_INVALID: ' + relative)
+            if calculate_sha256(file_path) != expected:
+                raise PackageValidationError('AAPS_MIGRATION_DIGEST_MISMATCH: ' + relative)
+
     return {
 
     "status": "VALID",

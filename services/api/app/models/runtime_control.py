@@ -53,6 +53,7 @@ class ApplicationDatabaseResource(Base):
         UniqueConstraint("container_name", name="uq_application_database_container"),
         UniqueConstraint("data_volume", name="uq_application_database_volume"),
         UniqueConstraint("bootstrap_secret_volume", name="uq_application_database_bootstrap_volume"),
+        UniqueConstraint("runtime_secret_volume", name="uq_application_database_runtime_volume"),
         # The DB runtime is intentionally NOT constrained to one status per app.
         # Multiple instances of the same application must have isolated databases.
     )
@@ -75,6 +76,7 @@ class ApplicationDatabaseResource(Base):
     container_name: Mapped[str] = mapped_column(String(80), nullable=False)
     data_volume: Mapped[str] = mapped_column(String(80), nullable=False)
     bootstrap_secret_volume: Mapped[str] = mapped_column(String(80), nullable=False)
+    runtime_secret_volume: Mapped[str] = mapped_column(String(80), nullable=False)
     # Only immutable image identities may be recorded after approval, not tags.
     database_image_id: Mapped[str | None] = mapped_column(String(90), nullable=True)
     migration_revision: Mapped[str | None] = mapped_column(String(100), nullable=True)

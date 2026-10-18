@@ -45,6 +45,7 @@ class DatabaseResourcePlan:
     container_name: str
     data_volume: str
     bootstrap_secret_volume: str
+    runtime_secret_volume: str
 
 
 # Explicitly bounded first supported engine. Do not imply that schema-advertised
@@ -100,6 +101,7 @@ def database_resource_plan(
         container_name=f"augmis-pg-{suffix}",
         data_volume=f"augmis-pgdata-{suffix}",
         bootstrap_secret_volume=f"augmis-pgbootstrap-{suffix}",
+        runtime_secret_volume=f"augmis-pgruntime-{suffix}",
     )
 
 
@@ -154,6 +156,7 @@ def reserve_application_database(
             or existing.container_name != plan.container_name
             or existing.data_volume != plan.data_volume
             or existing.bootstrap_secret_volume != plan.bootstrap_secret_volume
+            or existing.runtime_secret_volume != plan.runtime_secret_volume
             or existing.storage_request != requirement.storage
         ):
             raise ApplicationDatabaseError("Existing database reservation conflicts with application requirements")
@@ -171,6 +174,7 @@ def reserve_application_database(
         container_name=plan.container_name,
         data_volume=plan.data_volume,
         bootstrap_secret_volume=plan.bootstrap_secret_volume,
+        runtime_secret_volume=plan.runtime_secret_volume,
         status="reserved",
         attempts=0,
     )

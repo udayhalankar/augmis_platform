@@ -16,6 +16,10 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
   InputAdornment,
   TextField,
   Typography,
@@ -24,6 +28,8 @@ import {
 import AppsOutlined from "@mui/icons-material/AppsOutlined";
 import RefreshOutlined from "@mui/icons-material/RefreshOutlined";
 import SearchOutlined from "@mui/icons-material/SearchOutlined";
+
+import { usePermissions } from "@/context/permission-context";
 
 import AppShell from "@/components/app-shell";
 import ProtectedRoute from "@/components/protected-route";
@@ -36,6 +42,7 @@ import {
   loadTenantApplications,
   openTenantContainerApplication,
   openTenantStaticApplication,
+  promoteTenantApplicationBaseline,
   TenantApplicationCatalog,
   TenantAvailableApplication,
 } from "@/lib/tenant-applications";
@@ -87,6 +94,10 @@ function formatStatus(
 
 
 export default function TenantApplicationsPage() {
+  const { hasTenantPermission } = usePermissions();
+  const canPromote = hasTenantPermission("subscription.manage") &&
+    hasTenantPermission("application.deploy");
+
   const {
     selectedTenant,
     selectedTenantId,
@@ -122,6 +133,30 @@ export default function TenantApplicationsPage() {
     setOpeningSubscriptionId,
   ] = useState("");
 
+
+  const [pendingPromotion, setPendingPromotion] =
+    useState<TenantAvailableApplication | null>(null);
+  const [promotionBusy, setPromotionBusy] = useState(false);
+
+  // Explicit approval is required. A new publisher version must never
+  // change an existing commercial subscription without tenant consent.
+  const confirmPromotion = async () => {
+    const item = pendingPromotion;
+    const target = item?.promotableVersion;
+    if (!item || !target || !selectedTenantId || !canPromote) return;
+    setPromotionBusy(true);
+    setError("");
+    try {
+      await promoteTenantApplicationBaseline(item.subscriptionId, target.id);
+      setPendingPromotion(null);
+      await loadTenantApplications(selectedTenantId).then(setCatalog);
+    } catch (promotionError) {
+      setError(apiError(promotionError, "Version update could not be completed."));
+      setPendingPromotion(null);
+    } finally {
+      setPromotionBusy(false);
+    }
+  };
 
   const loadCatalog =
     useCallback(
@@ -939,6 +974,15 @@ export default function TenantApplicationsPage() {
                         }
                       />
 
+                      {item.runningVersion && (
+                        <Meta label="Running" value={item.runningVersion} />
+                      )}
+
+                      <Meta
+                        label="Latest Published"
+                        value={item.latestPublishedVersion?.version || item.version.version}
+                      />
+
                       <Meta
                         label="Technical"
                         value={
@@ -987,6 +1031,22 @@ export default function TenantApplicationsPage() {
                       />
                     </Box>
 
+
+                    {item.versionUpdateAvailable && (
+                      <Box sx={{ px: 2.5, py: 1.25, borderTop: "1px solid", borderColor: "divider" }}>
+                        <Alert severity="info" sx={{ mb: 1 }}>
+                          Version {item.promotableVersion?.version} is available for your subscription.
+                          Your subscription is currently on {item.version.version}.
+                          Existing running instances will not be upgraded by this action.
+                        </Alert>
+                        {canPromote && (
+                          <Button size="small" variant="outlined" disabled={promotionBusy}
+                            onClick={() => setPendingPromotion(item)}>
+                            Update subscription baseline
+                          </Button>
+                        )}
+                      </Box>
+                    )}
 
                     {item.version.buildType !== "static_web" && item.runtimeState === "stopped" && (
                        <Alert severity="warning" sx={{mx:2.5,mb:1.5}}>
@@ -1055,6 +1115,23 @@ export default function TenantApplicationsPage() {
           ) : null}
 
         </Box>
+        <Dialog open={Boolean(pendingPromotion)} onClose={() => !promotionBusy && setPendingPromotion(null)} maxWidth="sm" fullWidth>
+          <DialogTitle>Update application subscription version?</DialogTitle>
+          <DialogContent>
+            <Typography variant="body2">
+              {pendingPromotion?.application.name}: change the subscribed baseline from
+              {" "}{pendingPromotion?.version.version} to {pendingPromotion?.promotableVersion?.version}.
+              This changes future deployment defaults, not the running container or its database.
+              Existing permissions and entitlements are preserved.
+            </Typography>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setPendingPromotion(null)} disabled={promotionBusy}>Cancel</Button>
+            <Button variant="contained" onClick={confirmPromotion} disabled={promotionBusy}>
+              {promotionBusy ? "Updating..." : "Confirm version update"}
+            </Button>
+          </DialogActions>
+        </Dialog>
       </AppShell>
     </ProtectedRoute>
   );

@@ -73,6 +73,8 @@ from services.api.app.services.authorization_service import (
     require_tenant_permission,
 )
 
+from services.api.app.services.crud_runtime_assertions import make_crud_request_assertion
+from services.api.app.services.private_crud_runtime import CrudRuntimeError
 from services.api.app.services.dashboard_runtime_assertions import (
     ASSERTION_HEADER,
     AssertionIssuanceError,
@@ -986,8 +988,6 @@ async def _proxy_runtime_gateway_request(
             )
         )
 
-    body = await request.body()
-
     outgoing_headers = {}
 
     # Never forward caller-controlled AUGMIS identity or assertion headers.
@@ -1026,6 +1026,50 @@ async def _proxy_runtime_gateway_request(
             "instance"
         ].id
     )
+
+    body = await request.body()
+    # C1-B4: only signed gateway context may access the reference-app API.
+    # There is no trusted browser-supplied tenant, identity or assertion.
+    if (context["version"].manifest.get("metadata") or {}).get("id") == "augmis-crud-reference":
+        try:
+            # No general app-record permission catalogue exists yet. Require
+            # tenant deployment permission for reference-app mutations.
+            if request.method in {"POST", "PUT", "DELETE"}:
+                require_tenant_permission(
+                    db=db, user=context["user"], tenant_id=context["tenant"].id,
+                    permission_code="application.deploy")
+            crud_assertion = make_crud_request_assertion(
+                context=context, method=request.method,
+                relative_path=str(path or ""), body=body,
+                raw_query=(upstream_path.split("?", 1)[1] if "?" in upstream_path else ""),
+            ) if str(path or "").startswith("api/") else None
+            if str(path or "").startswith("api/") and not crud_assertion:
+                raise HTTPException(status_code=403, detail="Private CRUD assertion not enabled")
+            if crud_assertion:
+                outgoing_headers[ASSERTION_HEADER] = crud_assertion
+        except AuthorizationError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+        except CrudRuntimeError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+
+    # C1-C3: generic private database AAPS. The manifest route contract is
+    # authoritative; never forward an unsigned /api/ request or trust a caller
+    # supplied identity header. Existing C1-B4 CRUD assertions are unchanged.
+    if ((context["version"].manifest.get("addons") or {}).get("database") or {}).get("schema") is not None and \
+            (context["version"].manifest.get("metadata") or {}).get("id") != "augmis-crud-reference":
+        from services.api.app.services.aaps_runtime_assertions import make_aaps_request_assertion
+        if str(path or "").startswith("api/"):
+            try:
+                if request.method in {"POST","PUT","PATCH","DELETE"}:
+                    require_tenant_permission(db=db,user=context["user"],
+                        tenant_id=context["tenant"].id,permission_code="application.deploy")
+                outgoing_headers[ASSERTION_HEADER]=make_aaps_request_assertion(
+                    context=context,method=request.method,relative_path=str(path or ""),body=body,
+                    raw_query=(upstream_path.split("?",1)[1] if "?" in upstream_path else ""))
+            except AuthorizationError as error:
+                raise HTTPException(status_code=403,detail=str(error)) from error
+            except CrudRuntimeError as error:
+                raise HTTPException(status_code=403,detail=str(error)) from error
 
     # Opt-in pilot: revalidated gateway context is the ONLY claims source.
     # For other AAPS apps this returns None and changes no behavior.

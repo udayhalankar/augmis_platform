@@ -20,7 +20,7 @@ import subprocess
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Mapping
 
 from sqlalchemy import select
@@ -33,7 +33,7 @@ from services.api.app.services.application_database_provisioning import (
 )
 
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_ALLOWED_STATES = frozenset({"reserved", "failed", "database_ready", "ready"})
+_ALLOWED_STATES = frozenset({"reserved", "failed", "database_ready"})
 _SECRET_PATH = "/run/bootstrap/postgres_password"
 _LABEL = "augmis.database_instance_id"
 
@@ -255,6 +255,7 @@ class PostgreSQLInfrastructure:
 def provision_private_postgres(
     *, db: Session, instance_id: uuid.UUID,
     settings: DockerDatabaseSettings, call: DockerCall = docker_call,
+    recover_stale: bool = False,
 ) -> ApplicationDatabaseResource:
     """Provision Docker resources for a pre-reserved C1-A DB instance.
 
@@ -279,18 +280,27 @@ def provision_private_postgres(
     except ApplicationDatabaseError as exc:
         raise DatabaseInfrastructureError("C1B_UNSUPPORTED_RESERVED_DATABASE") from exc
     for attr in ("database_name", "database_host_alias", "network_name", "container_name",
-                 "data_volume", "bootstrap_secret_volume"):
+                 "data_volume", "bootstrap_secret_volume", "runtime_secret_volume"):
         if getattr(row, attr) != getattr(plan, attr):
             raise DatabaseInfrastructureError("C1B_RESOURCE_IDENTITY_DRIFT")
 
     if row.status == "provisioning":
-        raise DatabaseInfrastructureError("C1B_PROVISIONING_ALREADY_IN_PROGRESS")
-    if row.status not in _ALLOWED_STATES:
+        # Only an explicit operator recovery may reclaim an old interrupted
+        # attempt. Never use the generic Open Application path to steal a live
+        # worker's reservation or silently alter existing Docker resources.
+        updated = getattr(row, "updated_at", None)
+        now = datetime.now(timezone.utc)
+        stale = updated is not None and updated.tzinfo is not None and (now - updated) >= timedelta(minutes=15)
+        if not (recover_stale and stale):
+            raise DatabaseInfrastructureError("C1B_PROVISIONING_ALREADY_IN_PROGRESS")
+    if row.status == "ready":
+        # A Docker-only verification cannot establish roles, migrations or RLS.
+        raise DatabaseInfrastructureError("C1B_READY_REQUIRES_SECURITY_PREFLIGHT")
+    if row.status not in _ALLOWED_STATES and row.status != "provisioning":
         raise DatabaseInfrastructureError("C1B_UNEXPECTED_RESOURCE_STATE")
 
     # Only mark C1-A 'ready' in the future after restricted roles, migrations,
     # policies and credential delivery have been verified (C1-B2/C1-C).
-    old_status = row.status
     row.status = "provisioning"
     row.error_code = None
     row.attempts = int(row.attempts or 0) + 1
@@ -317,7 +327,7 @@ def provision_private_postgres(
         raise DatabaseInfrastructureError("C1B_UNEXPECTED_PROVISIONING_FAILURE") from exc
 
     row.database_image_id = settings.image_id
-    row.status = old_status if old_status == "ready" else "database_ready"
+    row.status = "database_ready"
     # ready_at stays NULL. Database role/schema security has not been validated.
     db.commit()
     return row

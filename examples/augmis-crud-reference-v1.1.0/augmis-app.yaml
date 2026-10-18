@@ -1,0 +1,28 @@
+apiVersion: apps.augmis.com/v1alpha1
+kind: Application
+metadata:
+  id: augmis-crud-reference
+  name: AUGMIS CRUD Reference
+  version: 1.1.0
+  description: Independent PostgreSQL-backed CRUD test application for AUGMIS authenticated PostgreSQL CRUD acceptance.
+runtime:
+  deploymentMode: dedicated
+  buildType: dockerfile
+  context: .
+  dockerfile: Dockerfile
+services:
+  web:
+    type: web
+    port: 8080
+    public: true
+    health:
+      path: /health
+      intervalSeconds: 15
+addons:
+  database:
+    type: postgresql
+    version: '15'
+    storage: 1Gi
+lifecycle:
+  startupTimeoutSeconds: 180
+  rollbackEnabled: true

@@ -67,6 +67,7 @@ from services.api.app.models.platform import (
 
 from services.api.app.schemas.subscription import (
     SubscriptionChangeOfferRequest,
+    SubscriptionPromoteBaselineRequest,
     SubscriptionSuspendRequest,
 )
 
@@ -2173,6 +2174,37 @@ def list_tenant_available_applications(
         ))
     }
 
+    # C1-C4: Discover only already-PUBLISHED and technically ready versions
+    # for applications belonging to this authorized tenant catalog.
+    # Do not change the commercial subscription baseline automatically.
+    application_ids = {application.id for _, _, application, _ in rows}
+    published_by_app = {}
+    if application_ids:
+        for candidate in db.scalars(
+            select(ApplicationVersion).where(
+                ApplicationVersion.application_id.in_(application_ids),
+                ApplicationVersion.publication_status == "published",
+            )
+        ):
+            if is_version_technically_ready(candidate):
+                published_by_app.setdefault(candidate.application_id, []).append(candidate)
+
+    # Running instances are independent of the subscription baseline.
+    # Showing the actual active version avoids confusing a published
+    # version, a subscribed baseline, and an already-running deployment.
+    running_versions_by_app = {}
+    if application_ids:
+        for instance, active_version in db.execute(
+            select(ApplicationInstance, ApplicationVersion)
+            .join(ApplicationVersion, ApplicationVersion.id == ApplicationInstance.active_version_id)
+            .where(
+                ApplicationInstance.tenant_id == tenant.id,
+                ApplicationInstance.application_id.in_(application_ids),
+                ApplicationInstance.status == "running",
+            )
+        ):
+            running_versions_by_app.setdefault(instance.application_id, set()).add(active_version.version)
+
     items = []
 
     for (
@@ -2207,8 +2239,55 @@ def list_tenant_available_applications(
             else technical_status == "image_ready"
         )
 
+        # Expose a tenant-safe version-update hint. The existing
+        # promote-baseline POST still makes the authoritative permission,
+        # publication and same-major checks under a row lock.
+        latest_published = None
+        valid_candidates = []
+        for candidate in published_by_app.get(application.id, []):
+            try:
+                parse_version(candidate.version)
+            except VersionPolicyError:
+                continue
+            valid_candidates.append(candidate)
+        if valid_candidates:
+            latest_published = max(
+                valid_candidates, key=lambda candidate: parse_version(candidate.version)
+            )
+
+        # Offer a compatible same-major target even if the publisher has
+        # also published a newer, incompatible major release.
+        promotable = None
+        if subscription.version_policy == "same_major" and subscription.pinned_version_id is None:
+            try:
+                current = parse_version(version.version)
+                eligible = [
+                    candidate for candidate in valid_candidates
+                    if parse_version(candidate.version) > current
+                    and parse_version(candidate.version).major == current.major
+                ]
+                if eligible:
+                    promotable = max(eligible, key=lambda candidate: parse_version(candidate.version))
+            except VersionPolicyError:
+                promotable = None
+        upgrade_available = promotable is not None
+
         items.append(
             {
+                "runningVersion": (
+                    next(iter(running_versions_by_app[application.id]))
+                    if len(running_versions_by_app.get(application.id, set())) == 1
+                    else ("Multiple versions" if running_versions_by_app.get(application.id) else None)
+                ),
+                "latestPublishedVersion": (
+                    {"id": str(latest_published.id), "version": latest_published.version}
+                    if latest_published else None
+                ),
+                "versionUpdateAvailable": upgrade_available,
+                "promotableVersion": (
+                    {"id": str(promotable.id), "version": promotable.version}
+                    if promotable else None
+                ),
                 "subscriptionId":
                     str(subscription.id),
 
@@ -3727,3 +3806,115 @@ def change_subscription_offer(
             in target_entitlements
         ],
     }
+# =========================================================
+# C1-B5 — EXPLICIT SUBSCRIPTION BASELINE PROMOTION
+# This updates only the version baseline; it never changes
+# the offer, entitlements, pinned version or auto-upgrade.
+# =========================================================
+
+@router.post("/subscriptions/{subscription_id}/promote-baseline")
+def promote_subscription_baseline(
+    subscription_id: uuid.UUID,
+    payload: SubscriptionPromoteBaselineRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    subscription = db.scalar(
+        select(TenantSubscription)
+        .where(TenantSubscription.id == subscription_id)
+        .with_for_update()
+    )
+    if subscription is None:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    # Changing the default future deployment requires both permissions.
+    try:
+        for permission in ("subscription.manage", "application.deploy"):
+            require_tenant_permission(
+                db=db, user=current_user, tenant_id=subscription.tenant_id,
+                permission_code=permission,
+            )
+    except AuthorizationError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+    if subscription.status != "active":
+        raise HTTPException(status_code=409, detail="Subscription must be active")
+    tenant = db.get(Tenant, subscription.tenant_id)
+    if tenant is None or tenant.status != "active":
+        raise HTTPException(status_code=409, detail="Tenant must be active")
+
+    offer = db.get(ApplicationOffer, subscription.offer_id)
+    if offer is None:
+        raise HTTPException(status_code=409, detail="Subscription offer is missing")
+    if subscription.version_policy != "same_major" or subscription.pinned_version_id is not None:
+        raise HTTPException(status_code=409, detail="Only unpinned same_major baselines can be promoted")
+    if not subscription.baseline_version_id:
+        raise HTTPException(status_code=409, detail="Subscription has no baseline")
+    previous = db.get(ApplicationVersion, subscription.baseline_version_id)
+    target = db.get(ApplicationVersion, payload.target_version_id)
+    if previous is None or previous.application_id != offer.application_id:
+        raise HTTPException(status_code=409, detail="Subscription baseline is invalid")
+    if target is None or target.application_id != offer.application_id:
+        raise HTTPException(status_code=404, detail="Target version not found for this application")
+    if target.publication_status != "published" or not is_version_technically_ready(target):
+        raise HTTPException(status_code=409, detail="Target version must be published and technically ready")
+
+    try:
+        # Enforces existing subscription's same_major boundary.
+        require_subscription_version_allowed(
+            db=db, subscription=subscription, target_version=target,
+        )
+        old_semver = parse_version(previous.version)
+        new_semver = parse_version(target.version)
+    except VersionPolicyError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    if new_semver < old_semver:
+        raise HTTPException(status_code=409, detail="Baseline downgrade is not allowed by this endpoint")
+
+    if target.id == previous.id:
+        return {
+            "status": "UNCHANGED", "subscriptionId": str(subscription.id),
+            "version": previous.version, "baselineVersionId": str(previous.id),
+            "versionPolicy": subscription.version_policy,
+        }
+
+    # Verify the selected container version has a ready image (not just a status flag).
+    if str(target.build_type or "").lower() != "static_web":
+        from services.api.app.models.platform import ApplicationBuild
+        ready_build = db.scalar(
+            select(ApplicationBuild)
+            .where(
+                ApplicationBuild.application_version_id == target.id,
+                ApplicationBuild.status == "ready",
+                ApplicationBuild.image_ref.isnot(None),
+            )
+            .limit(1)
+        )
+        if ready_build is None:
+            raise HTTPException(status_code=409, detail="Target version has no ready container build")
+
+    # Reuse existing advisory lock used by the Open/deploy lifecycle.
+    acquire_instance_limit_lock(
+        db=db, tenant_id=subscription.tenant_id, application_id=offer.application_id,
+    )
+    subscription.baseline_version_id = target.id
+    record_audit_event(
+        db, action="subscription.baseline.promoted",
+        resource_type="tenant_subscription", resource_id=subscription.id,
+        actor_user_id=current_user.id, tenant_id=subscription.tenant_id,
+        outcome="success", message="Subscription baseline promoted.",
+        metadata={
+            "applicationId": str(offer.application_id),
+            "previousBaselineVersionId": str(previous.id),
+            "targetBaselineVersionId": str(target.id),
+            "versionPolicy": subscription.version_policy,
+        },
+    )
+    db.commit()
+    return {
+        "status": "PROMOTED", "subscriptionId": str(subscription.id),
+        "fromVersion": previous.version, "version": target.version,
+        "baselineVersionId": str(target.id), "versionPolicy": subscription.version_policy,
+    }
+
