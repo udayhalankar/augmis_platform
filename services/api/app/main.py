@@ -254,3 +254,16 @@ def root():
 
 # B1/B2 runtime control routes with backend authorization.
 app.include_router(runtime_control.router)
+
+
+# C1-D1: observe host readiness at startup; do not take the entire management
+# API offline merely because Docker is temporarily unavailable. Each generic
+# deployment rechecks readiness before reserving any database resources.
+def _c1d_record_runtime_host_readiness():
+    import logging
+    from services.api.app.services.runtime_host_readiness import check_runtime_host
+    result = check_runtime_host()
+    app.state.runtime_host_readiness = result
+    logging.getLogger('uvicorn.error').info('runtime_host_state=%s code=%s', result.state, result.code)
+
+app.add_event_handler('startup', _c1d_record_runtime_host_readiness)

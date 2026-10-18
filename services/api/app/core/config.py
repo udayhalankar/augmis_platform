@@ -6,6 +6,12 @@ from pydantic_settings import (
 )
 
 
+from services.api.app.core.runtime_host import hydrate_runtime_profile
+
+# Load the durable, non-secret runtime host profile before importing any routes.
+hydrate_runtime_profile()
+
+
 class Settings(BaseSettings):
 
     app_name: str = "AUGMIS SaaS Platform"

@@ -27,6 +27,12 @@ _NET=re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}\Z')
 def prepare_generic_private_runtime(*, db: Session, instance: ApplicationInstance, manifest: dict) -> CrudRuntimeLaunch:
     if str(settings.app_env).lower() not in {'dev','development'} or os.environ.get('AUGMIS_C1C_GENERIC_RUNTIME_ENABLED')!='1':
         raise CrudRuntimeError('C1C_GENERIC_RUNTIME_DISABLED')
+    # C1-D1: fail closed before instance DB reservation when runtime host is unready.
+    from services.api.app.services.runtime_host_readiness import require_generic_host_ready
+    try:
+        require_generic_host_ready()
+    except ValueError as exc:
+        raise CrudRuntimeError(str(exc)) from exc
     plan=assess_manifest(manifest)
     if not plan.requires_private_database or plan.database_engine!='postgresql' or plan.database_version!='15':
         raise CrudRuntimeError('C1C_GENERIC_DATABASE_UNSUPPORTED')
