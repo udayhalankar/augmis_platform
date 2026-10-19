@@ -17,10 +17,12 @@ import RuntimeQuotaManager from "@/components/runtime-quota-manager";
 import ProtectedRoute from "@/components/protected-route";
 import AppShell from "@/components/app-shell";
 import { useTenant } from "@/context/tenant-context";
+import { usePermissions } from "@/context/permission-context";
 import {
   listRuntimeInstances, listRuntimeJobs, getRuntimeQuota, getRuntimeConfig, updateRuntimeConfig,
   stopRuntimeInstance, restartRuntimeInstance, listRuntimeDeployments,
   getRuntimeDeploymentHealth, getRuntimeDeploymentLogs,
+  getReleaseOptions, upgradeRuntimeRelease, rollbackRuntimeRelease, type ReleaseOptions,
   type RuntimeInstance, type RuntimeJob, type RuntimeConfig, type RuntimeQuota,
 } from "@/lib/runtime-control";
 
@@ -37,6 +39,8 @@ function errorMessage(err: unknown): string {
 
 export default function RuntimeControlPage() {
   const { selectedTenant, selectedTenantId, loading: tenantLoading } = useTenant();
+  const { hasTenantPermission } = usePermissions();
+  const canManageReleases = hasTenantPermission("application.deploy") && hasTenantPermission("subscription.manage");
   const [instances, setInstances] = useState<RuntimeInstance[]>([]);
   const [jobs, setJobs] = useState<RuntimeJob[]>([]);
   const [quota, setQuota] = useState<RuntimeQuota | null>(null);
@@ -50,6 +54,49 @@ export default function RuntimeControlPage() {
   const [pendingAction, setPendingAction] = useState<{ id: string; name: string; action: "stop" | "restart" } | null>(null);
   const [detailDialog, setDetailDialog] = useState<{ title: string; contents: string } | null>(null);
   const [detailBusyId, setDetailBusyId] = useState("");
+  const [releaseOptions, setReleaseOptions] = useState<ReleaseOptions | null>(null);
+  const [releaseBusyId, setReleaseBusyId] = useState("");
+  const [releaseDialog, setReleaseDialog] = useState<{ id: string; name: string; action: "upgrade" | "rollback" } | null>(null);
+
+  const openReleaseDialog = async (instance: RuntimeInstance, action: "upgrade" | "rollback") => {
+    setError(""); setMessage(""); setReleaseBusyId(instance.id);
+    try {
+      const options = await getReleaseOptions(instance.id);
+      if (action === "upgrade" && !options.targetVersion) {
+        setError(options.upgradeBlockedReason || "No newer qualified release is available.");
+        return;
+      }
+      if (action === "rollback" && !options.rollbackAvailable) {
+        setError("No prior successful deployment is available for rollback.");
+        return;
+      }
+      setReleaseOptions(options);
+      setReleaseDialog({ id: instance.id, name: instance.name, action });
+    } catch (err) { setError(errorMessage(err)); }
+    finally { setReleaseBusyId(""); }
+  };
+
+  const confirmRelease = async () => {
+    const selected = releaseDialog;
+    if (!selected || !releaseOptions || !selectedTenantId || releaseBusyId) return;
+    setReleaseBusyId(selected.id); setError(""); setMessage("");
+    try {
+      if (selected.action === "upgrade") {
+        if (!releaseOptions.targetVersion) throw new Error("No eligible release selected");
+        await upgradeRuntimeRelease(selected.id, releaseOptions.targetVersion.id);
+        setMessage(`${selected.name} upgraded to ${releaseOptions.targetVersion.version}. Subscription baseline synchronized.`);
+      } else {
+        await rollbackRuntimeRelease(selected.id);
+        setMessage(`${selected.name} rolled back to its previous successful deployment. Subscription baseline remains unchanged.`);
+      }
+      setReleaseDialog(null); setReleaseOptions(null);
+      await reload(selectedTenantId);
+    } catch (err) {
+      setReleaseDialog(null); setReleaseOptions(null);
+      setError(errorMessage(err));
+      await reload(selectedTenantId);
+    } finally { setReleaseBusyId(""); }
+  };
 
   const reload = useCallback(async (tenantId: string) => {
     setLoading(true); setError("");
@@ -200,7 +247,7 @@ export default function RuntimeControlPage() {
                 <TableCell sx={{fontWeight:700}} align="right">Actions</TableCell>
               </TableRow></TableHead>
               <TableBody>{instances.map((i) => {
-                const waiting = lifecycleBusyId === i.id || detailBusyId === i.id;
+                const waiting = lifecycleBusyId === i.id || detailBusyId === i.id || releaseBusyId === i.id;
                 return <TableRow key={i.id} hover selected={currentId === i.id}>
                   <TableCell sx={{minWidth:220}}>
                     <Typography sx={{fontSize:13,fontWeight:600}}>{i.name}</Typography>
@@ -210,6 +257,14 @@ export default function RuntimeControlPage() {
                     color={i.status === "running" ? "success" : i.status === "failed" ? "error" : "default"}/></TableCell>
                   <TableCell align="right" sx={{minWidth:360}}>
                     <Box sx={{display:"flex",justifyContent:"flex-end",gap:1,flexWrap:"wrap"}}>
+                      {canManageReleases && <>
+                        <Button size="small" variant="contained"
+                          disabled={i.status !== "running" || waiting || Boolean(releaseBusyId) || busy}
+                          onClick={()=>void openReleaseDialog(i,"upgrade")}>Upgrade</Button>
+                        <Button size="small" variant="outlined"
+                          disabled={i.status !== "running" || waiting || Boolean(releaseBusyId) || busy}
+                          onClick={()=>void openReleaseDialog(i,"rollback")}>Rollback</Button>
+                      </>}
                       <Button size="small" variant="outlined" color="error" startIcon={<StopCircleOutlined />}
                         disabled={i.status !== "running" || Boolean(lifecycleBusyId) || Boolean(detailBusyId) || busy}
                         onClick={()=>setPendingAction({id:i.id,name:i.name,action:"stop"})}>Stop</Button>
@@ -265,6 +320,23 @@ export default function RuntimeControlPage() {
         </Box>)}
       </Paper>
     </>}
+    <Dialog open={Boolean(releaseDialog)} onClose={()=>{ if (!releaseBusyId) { setReleaseDialog(null); setReleaseOptions(null); } }} maxWidth="sm" fullWidth>
+      <DialogTitle>{releaseDialog?.action === "upgrade" ? "Upgrade running application?" : "Rollback running application?"}</DialogTitle>
+      <DialogContent>
+        <Typography variant="body2">{releaseDialog?.name}: active version {releaseOptions?.activeVersion.version ?? "unknown"}.
+          {releaseDialog?.action === "upgrade"
+            ? ` Target ${releaseOptions?.targetVersion?.version ?? "unknown"}. AUGMIS will validate and start the candidate, then synchronize the subscription baseline only after activation.`
+            : " Restore the previous successful compatible deployment. The subscription baseline remains on the published default; users will see the actual running version."}
+          {" "}The application database must be preserved.
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{px:3,pb:2}}>
+        <Button disabled={Boolean(releaseBusyId)} onClick={()=>{setReleaseDialog(null);setReleaseOptions(null);}}>Cancel</Button>
+        <Button variant="contained" disabled={Boolean(releaseBusyId)} onClick={()=>void confirmRelease()}>
+          {releaseBusyId ? "Applying..." : releaseDialog?.action === "upgrade" ? "Confirm upgrade" : "Confirm rollback"}
+        </Button>
+      </DialogActions>
+    </Dialog>
     <Dialog open={Boolean(pendingAction)} onClose={()=>{if (!lifecycleBusyId) setPendingAction(null);}} maxWidth="sm" fullWidth>
       <DialogTitle>{pendingAction?.action === "stop" ? "Stop application instance?" : "Start application?"}</DialogTitle>
       <DialogContent>

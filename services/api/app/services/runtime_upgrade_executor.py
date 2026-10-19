@@ -27,7 +27,8 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
                              target_version_id: uuid.UUID,
                              actor_user_id: uuid.UUID | None,
                              system_actor: bool = False,
-                             authorized_subscription_id: uuid.UUID | None = None):
+                             authorized_subscription_id: uuid.UUID | None = None,
+                             sync_subscription_baseline: bool = False):
     # =====================================================
     # 1. LOAD INSTANCE
     # =====================================================
@@ -152,6 +153,29 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
             status_code=403,
             detail=str(error),
         ) from error
+
+    # Release upgrades are explicitly developer/operator initiated. Publication
+    # and immutable-build qualification are checked BEFORE Docker is touched.
+    # The existing low-level upgrade API and trusted auto-upgrade worker retain
+    # their previous behavior when sync_subscription_baseline=False.
+    if sync_subscription_baseline:
+        from services.api.app.services.version_policy_service import parse_version
+        from services.api.app.services.c1d2_automatic_qualification import (
+            require_passing_build, QualificationGateError,
+        )
+        if subscription.version_policy != 'same_major' or subscription.pinned_version_id is not None:
+            raise HTTPException(status_code=409, detail='C1D3_RELEASE_POLICY_NOT_SUPPORTED')
+        if target_version.publication_status != 'published':
+            raise HTTPException(status_code=409, detail='C1D3_TARGET_NOT_PUBLISHED')
+        baseline = db.get(ApplicationVersion, subscription.baseline_version_id)
+        if baseline is None or parse_version(target_version.version) < parse_version(baseline.version):
+            raise HTTPException(status_code=409, detail='C1D3_BASELINE_DOWNGRADE_DENIED')
+        if parse_version(target_version.version) <= parse_version(current_version.version):
+            raise HTTPException(status_code=409, detail='C1D3_UPGRADE_MUST_ADVANCE_VERSION')
+        try:
+            require_passing_build(db, version=target_version)
+        except QualificationGateError as error:
+            raise HTTPException(status_code=409, detail=error.code) from error
 
     # =====================================================
     # 5. TARGET BUILD
@@ -445,6 +469,17 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
 
     instance.active_version_id = target_version.id
     instance.status = "running"
+    # Publish the new default only after the healthy candidate is activated.
+    # This shares the final Control Plane DB commit with active_version_id.
+    if sync_subscription_baseline:
+        subscription.baseline_version_id = target_version.id
+        record_audit_event(
+            db, action='subscription.baseline.promoted_by_release_upgrade',
+            resource_type='tenant_subscription', resource_id=subscription.id,
+            actor_user_id=actor_user_id, tenant_id=instance.tenant_id,
+            outcome='success', message='Baseline synchronized after healthy instance upgrade.',
+            metadata={'instanceId': str(instance.id), 'targetVersionId': str(target_version.id)},
+        )
 
     record_audit_event(
         db,

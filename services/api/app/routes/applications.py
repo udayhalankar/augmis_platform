@@ -72,6 +72,11 @@ from services.api.app.services.static_package_service import (
 )
 
 
+from services.api.app.services.c1d2_automatic_qualification import (
+    enqueue_ready_build, require_passing_build, QualificationGateError,
+)
+from services.api.app.models.deployment_reliability import ApplicationBuildQualification
+
 router = APIRouter(
     prefix="/api/v1",
     tags=["Applications"]
@@ -1906,6 +1911,19 @@ def build_application_package(
 
     db.refresh(version)
 
+    # C1-D2: automatically enqueue the exact ready image after a successful
+    # build. A separate trusted worker owns the Docker smoke test.
+    try:
+        enqueue_ready_build(db, build=build, version=version)
+        db.commit()
+    except QualificationGateError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={
+            'code': error.code,
+            'message': 'Build ready but qualification could not be enqueued',
+            'buildId': str(build.id),
+        }) from error
+
     # =====================================================
     # 11. RESPONSE
     # =====================================================
@@ -2011,6 +2029,8 @@ def get_build(
             detail=str(error),
         ) from error
 
+    qualification_row = db.scalar(select(ApplicationBuildQualification).where(
+        ApplicationBuildQualification.build_id == build.id))
     return {
 
         "id":
@@ -2034,7 +2054,9 @@ def get_build(
             build.started_at,
 
         "finishedAt":
-            build.finished_at
+            build.finished_at,
+        "qualificationStatus": qualification_row.status if qualification_row else None,
+        "qualificationFailureCode": qualification_row.failure_code if qualification_row else None,
     }
 
 @router.get(
@@ -2537,6 +2559,17 @@ def publish_application_version(
                 f"Required technical status: {required_state}."
             ),
         )
+
+    # C1-D2: fail closed on new, not-yet-published Docker versions.
+    # Already-published versions returned earlier, protecting existing tenants.
+    try:
+        require_passing_build(db, version=version)
+    except QualificationGateError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail={
+            'code': error.code,
+            'message': 'A passing immutable-build qualification is required before publication',
+        }) from error
 
     other_published_versions = list(
         db.scalars(

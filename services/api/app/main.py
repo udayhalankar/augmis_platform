@@ -266,4 +266,17 @@ def _c1d_record_runtime_host_readiness():
     app.state.runtime_host_readiness = result
     logging.getLogger('uvicorn.error').info('runtime_host_state=%s code=%s', result.state, result.code)
 
-app.add_event_handler('startup', _c1d_record_runtime_host_readiness)
+from contextlib import asynccontextmanager
+
+# Preserve existing application startup and shutdown handlers.
+_c1d_previous_lifespan = app.router.lifespan_context
+
+
+@asynccontextmanager
+async def _c1d_lifespan(asgi_app: FastAPI):
+    async with _c1d_previous_lifespan(asgi_app) as state:
+        _c1d_record_runtime_host_readiness()
+        yield state
+
+
+app.router.lifespan_context = _c1d_lifespan

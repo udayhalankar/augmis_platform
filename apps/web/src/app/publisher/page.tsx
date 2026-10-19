@@ -1919,6 +1919,10 @@ const refreshWorkspace =
                           mono
                         />
 
+                        <Button size="small" variant="outlined" href="/runtime-control">
+                          Manage tenant deployment / Upgrade / Rollback
+                        </Button>
+
                       </Box>
 
                     </Box>

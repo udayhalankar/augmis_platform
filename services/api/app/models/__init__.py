@@ -70,3 +70,9 @@ __all__ = [
     "PublisherMembership",
     "PublisherMembershipRole",
 ]
+
+# C1-D2/D3: durable deployability and recovery metadata (no runtime side effects).
+from services.api.app.models.deployment_reliability import (
+    ApplicationBuildQualification,
+    DeploymentOperationJournal,
+)

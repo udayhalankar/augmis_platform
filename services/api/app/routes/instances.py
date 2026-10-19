@@ -1301,6 +1301,116 @@ def upgrade_application_instance(
     )
 
 
+# C1-D3: developer/operator-controlled release lifecycle.  Publisher membership
+# alone is not permission to change a customer's running tenant instance.
+@router.get('/instances/{instance_id}/release-options')
+def get_release_options(
+    instance_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from services.api.app.services.entitlement_service import require_active_subscription, EntitlementError
+    from services.api.app.services.version_policy_service import (
+        get_latest_published_ready_version, require_subscription_version_allowed,
+        parse_version, VersionPolicyError,
+    )
+    instance = db.get(ApplicationInstance, instance_id)
+    if instance is None:
+        raise HTTPException(status_code=404, detail='Instance not found')
+    for permission in ('application.deploy', 'subscription.manage'):
+        try:
+            require_tenant_permission(db=db, user=current_user,
+                tenant_id=instance.tenant_id, permission_code=permission)
+        except AuthorizationError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+    current = db.get(ApplicationVersion, instance.active_version_id)
+    if current is None:
+        raise HTTPException(status_code=409, detail='Active version missing')
+    target = None
+    reason = None
+    sub = None
+    try:
+        sub = require_active_subscription(db=db, tenant_id=instance.tenant_id,
+                                          application_id=instance.application_id)
+        if sub.version_policy != 'same_major' or sub.pinned_version_id is not None:
+            reason = 'Only unpinned same_major subscriptions support coordinated release upgrades'
+        else:
+            candidate = get_latest_published_ready_version(db, instance.application_id)
+            require_subscription_version_allowed(db=db, subscription=sub, target_version=candidate)
+            if parse_version(candidate.version) > parse_version(current.version):
+                from services.api.app.services.c1d2_automatic_qualification import (
+                    require_passing_build, QualificationGateError,
+                )
+                try:
+                    require_passing_build(db, version=candidate)
+                    target = candidate
+                except QualificationGateError:
+                    reason = 'Latest published version has no passing qualification for its immutable build'
+    except (VersionPolicyError, EntitlementError) as error:
+        # Deliberately do not grant an upgrade if subscription lookup is
+        # ambiguous or dependencies cannot be validated.
+        reason = 'No eligible, qualified published release for this tenant instance'
+    running = db.scalar(select(ApplicationDeployment).where(
+        ApplicationDeployment.instance_id == instance.id,
+        ApplicationDeployment.status == 'running'
+    ).order_by(ApplicationDeployment.created_at.desc()))
+    previous = db.scalar(select(ApplicationDeployment).where(
+        ApplicationDeployment.instance_id == instance.id,
+        ApplicationDeployment.application_version_id != current.id,
+        ApplicationDeployment.deployed_at.isnot(None),
+        ApplicationDeployment.error_message.is_(None),
+    ).order_by(ApplicationDeployment.deployed_at.desc()))
+    rollback_ready = False
+    if instance.status == 'running' and sub is not None and running is not None and previous is not None:
+        previous_version = db.get(ApplicationVersion, previous.application_version_id)
+        if previous_version is not None and previous_version.status == 'image_ready':
+            try:
+                require_subscription_version_allowed(db=db, subscription=sub,
+                                                     target_version=previous_version)
+                old_build = db.scalar(select(ApplicationBuild.id).where(
+                    ApplicationBuild.application_version_id == previous_version.id,
+                    ApplicationBuild.status == 'ready',
+                    ApplicationBuild.image_ref.isnot(None),
+                ).limit(1))
+                rollback_ready = old_build is not None
+            except (VersionPolicyError, EntitlementError):
+                pass
+    return {
+        'instanceId': str(instance.id),
+        'instanceStatus': instance.status,
+        'activeVersion': {'id': str(current.id), 'version': current.version},
+        'targetVersion': ({'id': str(target.id), 'version': target.version}
+                          if target is not None and instance.status == 'running' else None),
+        'upgradeBlockedReason': reason,
+        'rollbackAvailable': rollback_ready,
+    }
+
+
+@router.post('/instances/{instance_id}/release-upgrade')
+def release_upgrade_instance(
+    instance_id: uuid.UUID,
+    payload: InstanceUpgradeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    instance = db.get(ApplicationInstance, instance_id)
+    if instance is None:
+        raise HTTPException(status_code=404, detail='Instance not found')
+    for permission in ('application.deploy', 'subscription.manage'):
+        try:
+            require_tenant_permission(db=db, user=current_user,
+                tenant_id=instance.tenant_id, permission_code=permission)
+        except AuthorizationError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+    require_runtime_launch_allowed(db, instance.tenant_id, instance.application_id)
+    from services.api.app.services.runtime_upgrade_executor import perform_instance_upgrade
+    return perform_instance_upgrade(
+        db=db, instance_id=instance_id, target_version_id=payload.target_version_id,
+        actor_user_id=current_user.id, system_actor=False,
+        sync_subscription_baseline=True,
+    )
+
+
 # B4 Pass 3H-5F: development-only, entitlement-gated two-phase pilot.
 # Requires explicit activation; never creates an offer or publishes a version.
 @router.post(

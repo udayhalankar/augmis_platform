@@ -106,3 +106,25 @@ export const getRuntimeDeploymentHealth = async (deploymentId: string): Promise<
 export type RuntimeLogSummary = { logs: string; source: "docker" | "archived" };
 export const getRuntimeDeploymentLogs = async (deploymentId: string): Promise<RuntimeLogSummary> =>
   (await api.get<RuntimeLogSummary>(`/api/v1/deployments/${encodeURIComponent(deploymentId)}/logs`, { params: { tail: 200 } })).data;
+
+
+// C1-D3: developer/operator actions; backend requires tenant-scoped
+// application.deploy + subscription.manage, and checks release qualifications.
+export type ReleaseOptions = {
+  instanceId: string;
+  instanceStatus: string;
+  activeVersion: { id: string; version: string };
+  targetVersion: { id: string; version: string } | null;
+  upgradeBlockedReason: string | null;
+  rollbackAvailable: boolean;
+};
+export async function getReleaseOptions(instanceId: string): Promise<ReleaseOptions> {
+  return (await api.get<ReleaseOptions>(`/api/v1/instances/${encodeURIComponent(instanceId)}/release-options`)).data;
+}
+export async function upgradeRuntimeRelease(instanceId: string, targetVersionId: string): Promise<unknown> {
+  return (await api.post(`/api/v1/instances/${encodeURIComponent(instanceId)}/release-upgrade`,
+    { target_version_id: targetVersionId })).data;
+}
+export async function rollbackRuntimeRelease(instanceId: string): Promise<unknown> {
+  return (await api.post(`/api/v1/instances/${encodeURIComponent(instanceId)}/rollback`)).data;
+}
