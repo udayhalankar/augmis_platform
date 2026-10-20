@@ -194,17 +194,19 @@ def advance_stage(db: Session, *, deployment_id: Any, worker: str,
 
 
 def quarantine_expired(db: Session, *, at: datetime | None = None,
-                       limit: int = 100) -> int:
+                       limit: int = 100, tenant_id: Any | None = None) -> int:
     """No Docker writes or implicit retry. Unknown outcomes require inspection."""
     if not 1 <= limit <= 1000:
         raise ReliabilityError('C1D_SCAN_LIMIT_INVALID')
     now = at or utcnow()
-    rows = list(db.scalars(select(DeploymentOperationJournal).where(
+    stmt = select(DeploymentOperationJournal).where(
         DeploymentOperationJournal.state == 'running',
         or_(DeploymentOperationJournal.lease_until.is_(None),
             DeploymentOperationJournal.lease_until <= now))
-        .order_by(DeploymentOperationJournal.created_at.asc())
-        .with_for_update(skip_locked=True).limit(limit)))
+    if tenant_id is not None:
+        stmt = stmt.where(DeploymentOperationJournal.tenant_id == tenant_id)
+    rows = list(db.scalars(stmt.order_by(DeploymentOperationJournal.created_at.asc())
+                           .with_for_update(skip_locked=True).limit(limit)))
     for row in rows:
         row.state = 'needs_reconciliation'
         row.failure_code = 'C1D_LEASE_EXPIRED_REVIEW_REQUIRED'

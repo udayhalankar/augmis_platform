@@ -16,6 +16,10 @@ from services.api.app.services.version_policy_service import (require_subscripti
 from services.api.app.services.deployment_engine import DeploymentError, stop_container
 from services.api.app.services.runtime_log_archive import archive_before_removal, archive_failed_start
 from services.api.app.services.runtime_controls_service import start_scoped_container
+from services.api.app.services.c1d3_operation_tracking import (
+    journal_reserved, journal_launch_started, journal_runtime_ready,
+    journal_promoted, journal_failed,
+)
 from services.api.app.services.audit_service import record_audit_event
 
 def safe_name(value: str) -> str:
@@ -295,12 +299,14 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
     )
 
     db.add(candidate)
+    journal_reserved(db, instance=instance, deployment=candidate)
 
     instance.status = "upgrading"
 
     db.commit()
 
     db.refresh(candidate)
+    journal_owner = journal_launch_started(db, deployment=candidate)
 
     # =====================================================
     # 8. START CANDIDATE CONTAINER
@@ -340,6 +346,8 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
         candidate.health_status = "unhealthy"
         candidate.error_message = str(error)
         archive_failed_start(candidate, error)
+        journal_failed(db, deployment=candidate, owner=journal_owner,
+                       code='C1D3_UPGRADE_LAUNCH_FAILED')
 
         instance.status = "running"
 
@@ -362,6 +370,9 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
             },
         ) from error
 
+    # Persist the engine-healthy candidate and handoff stage before retiring old.
+    journal_runtime_ready(db, deployment=candidate, owner=journal_owner,
+                          result=result)
     # B1A: persist the healthy candidate reference before deleting the old
     # container. A crash now leaves enough DB metadata to reconcile safely.
     candidate.container_id = result["container_id"]
@@ -405,6 +416,8 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
 
         candidate.status = "failed"
         candidate.health_status = "stopped"
+        journal_failed(db, deployment=candidate, owner=journal_owner,
+                       code='C1D3_UPGRADE_RETIRE_FAILED')
 
         candidate.error_message = (
             "Candidate was healthy but previous "
@@ -513,6 +526,7 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
         },
     )
 
+    journal_promoted(db, deployment=candidate, owner=journal_owner)
     db.commit()
 
     return {

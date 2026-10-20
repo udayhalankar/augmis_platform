@@ -87,6 +87,10 @@ from services.api.app.services.tenant_application_runtime_control import (
     get_runtime_launch_epoch, require_runtime_launch_allowed, set_runtime_desired_state,
 )
 from services.api.app.services.runtime_controls_service import start_scoped_container
+from services.api.app.services.c1d3_operation_tracking import (
+    journal_reserved, journal_launch_started, journal_runtime_ready,
+    journal_promoted, journal_failed,
+)
 from services.api.app.services.deployment_engine import (
     DeploymentError,
     start_container,
@@ -1699,6 +1703,7 @@ def deploy_application(
     )
 
     db.add(deployment)
+    journal_reserved(db, instance=instance, deployment=deployment)
 
     # This commit releases the advisory transaction lock,
     # but the new instance is already persisted as
@@ -1707,6 +1712,7 @@ def deploy_application(
 
     db.refresh(instance)
     db.refresh(deployment)
+    journal_owner = journal_launch_started(db, deployment=deployment)
 
     # =====================================================
     # 9. START CONTAINER
@@ -1746,6 +1752,8 @@ def deploy_application(
             str(error)
         )
         archive_failed_start(deployment, error)
+        journal_failed(db, deployment=deployment, owner=journal_owner,
+                       code='C1D3_CONTAINER_LAUNCH_FAILED')
 
         db.commit()
 
@@ -1778,6 +1786,8 @@ def deploy_application(
         # 10. SUCCESS
         # =====================================================
 
+    journal_runtime_ready(db, deployment=deployment, owner=journal_owner,
+                          result=result)
     now = datetime.now(
         timezone.utc
     )
@@ -1836,6 +1846,7 @@ def deploy_application(
         },
     )
 
+    journal_promoted(db, deployment=deployment, owner=journal_owner)
     db.commit()
 
     db.refresh(instance)
@@ -2885,12 +2896,14 @@ def rollback_application_instance(
     )
 
     db.add(candidate)
+    journal_reserved(db, instance=instance, deployment=candidate)
 
     instance.status = "upgrading"
 
     db.commit()
 
     db.refresh(candidate)
+    journal_owner = journal_launch_started(db, deployment=candidate)
 
     # =====================================================
     # 10. START ROLLBACK CANDIDATE
@@ -2928,6 +2941,8 @@ def rollback_application_instance(
         candidate.health_status = "unhealthy"
         candidate.error_message = str(error)
         archive_failed_start(candidate, error)
+        journal_failed(db, deployment=candidate, owner=journal_owner,
+                       code='C1D3_ROLLBACK_LAUNCH_FAILED')
 
         instance.status = "running"
 
@@ -2950,6 +2965,9 @@ def rollback_application_instance(
             },
         ) from error
 
+    # Record the healthy runtime handoff before retiring the previous app.
+    journal_runtime_ready(db, deployment=candidate, owner=journal_owner,
+                          result=result)
     # B1A: persist the healthy candidate reference before deleting the old
     # container. A crash now leaves enough DB metadata to reconcile safely.
     candidate.container_id = result["container_id"]
@@ -2991,6 +3009,8 @@ def rollback_application_instance(
 
         candidate.status = "failed"
         candidate.health_status = "stopped"
+        journal_failed(db, deployment=candidate, owner=journal_owner,
+                       code='C1D3_ROLLBACK_RETIRE_FAILED')
 
         candidate.error_message = (
             "Rollback candidate was healthy but "
@@ -3092,6 +3112,7 @@ def rollback_application_instance(
         },
     )
 
+    journal_promoted(db, deployment=candidate, owner=journal_owner)
     db.commit()
 
     db.refresh(instance)
@@ -3469,6 +3490,7 @@ def restart_application_instance(
     )
 
     db.add(deployment)
+    journal_reserved(db, instance=instance, deployment=deployment)
 
     # Provisioning is an active instance status and therefore
     # reserves the maxInstances slot before the advisory lock
@@ -3480,6 +3502,7 @@ def restart_application_instance(
 
     db.refresh(instance)
     db.refresh(deployment)
+    journal_owner = journal_launch_started(db, deployment=deployment)
 
     # =====================================================
     # 9. START CONTAINER
@@ -3514,6 +3537,8 @@ def restart_application_instance(
         deployment.health_status = "unhealthy"
         deployment.error_message = str(error)
         archive_failed_start(deployment, error)
+        journal_failed(db, deployment=deployment, owner=journal_owner,
+                       code='C1D3_RESTART_LAUNCH_FAILED')
 
         # Restart failure leaves the logical instance stopped.
         instance.status = "stopped"
@@ -3538,6 +3563,8 @@ def restart_application_instance(
     # 10. PROMOTE RESTART DEPLOYMENT
     # =====================================================
 
+    journal_runtime_ready(db, deployment=deployment, owner=journal_owner,
+                          result=result)
     now = datetime.now(
         timezone.utc
     )
@@ -3595,6 +3622,7 @@ def restart_application_instance(
         },
     )
 
+    journal_promoted(db, deployment=deployment, owner=journal_owner)
     db.commit()
 
     db.refresh(instance)

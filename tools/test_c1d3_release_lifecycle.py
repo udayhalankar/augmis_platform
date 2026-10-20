@@ -63,6 +63,14 @@ def fake_db():
 def setup(monkeypatch):
     db=fake_db()
     called=[]
+    # This release-lifecycle test isolates upgrade/rollback policy and launch
+    # outcomes. Journal DB transactions are covered by the dedicated
+    # test_c1d3_operation_tracking.py suite; this DB stub is not a Session.
+    monkeypatch.setattr(m, 'journal_reserved', lambda *args, **kwargs: None)
+    monkeypatch.setattr(m, 'journal_launch_started', lambda *args, **kwargs: 'test-owner')
+    monkeypatch.setattr(m, 'journal_runtime_ready', lambda *args, **kwargs: None)
+    monkeypatch.setattr(m, 'journal_promoted', lambda *args, **kwargs: None)
+    monkeypatch.setattr(m, 'journal_failed', lambda *args, **kwargs: None)
     monkeypatch.setattr(m,'require_active_subscription',lambda **kw:db.sub)
     monkeypatch.setattr(m,'require_active_entitlement',lambda **kw:None)
     monkeypatch.setattr(m,'require_subscription_version_allowed',lambda **kw:None)
