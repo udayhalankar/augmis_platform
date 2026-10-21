@@ -63,6 +63,10 @@ from tools.validate_package import (
     validate_application_package
 )
 
+from services.api.app.services.c1d5_source_analysis import analyze_source_zip
+from services.api.app.services.c1d5_aaps_generator import generate_aaps_zip, GenerationIssue
+from fastapi.responses import StreamingResponse
+
 from services.api.app.services.static_package_service import (
     StaticPackageValidationError,
     calculate_sha256,
@@ -161,6 +165,98 @@ def validate_static_html_file(path: Path) -> tuple[str, str]:
         )
 
     return html, sha256
+
+
+@router.post("/publishers/{publisher_id}/containerization/analyze")
+def analyze_containerization_source(
+    publisher_id: uuid.UUID,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """C1-D5.1 source analysis only. Never registers or executes uploaded code."""
+    publisher = db.get(Publisher, publisher_id)
+    if publisher is None:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+    try:
+        require_publisher_permission(
+            db=db, user=current_user, publisher_id=publisher.id,
+            permission_code="application.upload",
+        )
+    except AuthorizationError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Source filename is required")
+    # The upload is inspected in memory/from Starlette's spooled file.
+    # It is never persisted to the published/quarantine artifact stores.
+    try:
+        file.file.seek(0, 2)
+        compressed_size = file.file.tell()
+        file.file.seek(0)
+        max_bytes = settings.max_upload_size_mb * 1024 * 1024
+        if compressed_size > max_bytes:
+            raise HTTPException(status_code=413, detail="Source ZIP exceeds upload limit")
+        return analyze_source_zip(file.file, file.filename, max_bytes)
+    finally:
+        file.file.close()
+
+
+@router.post("/publishers/{publisher_id}/containerization/generate")
+def generate_containerization_draft(
+    publisher_id: uuid.UUID,
+    file: UploadFile = File(...),
+    app_key: str = Form(...),
+    app_name: str = Form(...),
+    version: str = Form(...),
+    routes_json: str = Form(""),
+    schema_json: str = Form(""),
+    output_dir: str = Form("dist"),
+    mode: str = Form("preview"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """C1-D5.2 draft generation only; no registration/build/qualification."""
+    publisher = db.get(Publisher, publisher_id)
+    if publisher is None:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+    try:
+        require_publisher_permission(
+            db=db, user=current_user, publisher_id=publisher.id,
+            permission_code="application.upload",
+        )
+    except AuthorizationError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if mode not in ("preview", "download"):
+        raise HTTPException(status_code=400, detail={
+            "code": "GEN_MODE_INVALID", "problem": "Invalid generation mode.",
+            "correction": "Use preview or download.", "location": None,
+        })
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    try:
+        source = file.file.read(max_bytes + 1)
+        if len(source) > max_bytes:
+            raise HTTPException(status_code=413, detail={
+                "code": "GEN_UPLOAD_TOO_LARGE", "problem": "Uploaded source ZIP is too large.",
+                "correction": "Remove generated build folders and dependencies.", "location": None,
+            })
+        try:
+            artifact, meta = generate_aaps_zip(
+                source, filename=file.filename or "", app_key=app_key,
+                app_name=app_name, version=version,
+                routes_json=routes_json, schema_json=schema_json,
+                output_dir=output_dir, max_upload_bytes=max_bytes,
+            )
+        except GenerationIssue as error:
+            raise HTTPException(status_code=422, detail=error.as_dict()) from error
+        if mode == "preview":
+            return meta
+        headers = {
+            "Content-Disposition": f'attachment; filename="{app_key}-{version}-draft-aaps.zip"',
+            "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+        }
+        return StreamingResponse(iter((artifact,)), media_type="application/zip", headers=headers)
+    finally:
+        file.file.close()
 
 
 @router.post(

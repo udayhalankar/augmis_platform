@@ -132,6 +132,8 @@ def build_docker_image(
                 command,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds
             )
 
@@ -156,7 +158,8 @@ def build_docker_image(
         if result.returncode != 0:
 
             raise BuildError(
-                build_log
+                build_log.strip()
+                or f"Docker build failed with exit code {result.returncode}; no output was captured."
             )
 
         return {

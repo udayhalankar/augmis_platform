@@ -1,6 +1,8 @@
 // apps/web/src/app/publisher/page.tsx
 "use client";
 
+import Link from "next/link";
+
 import {
   useCallback,
   useEffect,
@@ -1304,6 +1306,16 @@ const refreshWorkspace =
                     Publisher Users &amp; Roles
                   </Button>
                 )}
+
+                <Button
+                  component={Link}
+                  href="/publisher/containerize"
+                  variant="outlined"
+                  startIcon={<BuildOutlined />}
+                  disabled={!selectedPublisherId}
+                >
+                  Containerize App
+                </Button>
 
                 <Button
                   variant="contained"

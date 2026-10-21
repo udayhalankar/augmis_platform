@@ -526,3 +526,92 @@ export async function retireApplicationOffer(
 
   return response.data;
 }
+
+
+// C1-D5.1: inspection-only source ZIP analyzer; not Publisher submission.
+export type SourceValidationCheck = {
+  id: string;
+  label: string;
+  status: "passed" | "failed" | "action_required" | "not_checked";
+  code: string;
+  location: string | null;
+  problem: string;
+  correction: string;
+};
+
+export type SourceAnalysisReport = {
+  schemaVersion: string;
+  sourceSha256: string;
+  sourceRoot: string | null;
+  filesInspected: number;
+  detectedStack: string;
+  classification: "supported" | "guided_mapping" | "unsupported";
+  analysisPassed: boolean;
+  publisherSubmissionEligible: boolean;
+  publisherSubmissionReason: string;
+  summary: { passed: number; failed: number; actionRequired: number; notChecked: number };
+  checks: SourceValidationCheck[];
+};
+
+export async function analyzePublisherSource(
+  publisherId: string, file: File
+): Promise<SourceAnalysisReport> {
+  const data = new FormData();
+  data.append("file", file);
+  const response = await api.post<SourceAnalysisReport>(
+    `/api/v1/publishers/${publisherId}/containerization/analyze`, data,
+  );
+  return response.data;
+}
+
+// C1-D5.2: preparation only. It does not register, build or publish.
+export type GeneratedAapsDraft = {
+  stage: "C1-D5.2";
+  status: "generated";
+  sourceSha256: string;
+  artifactSha256: string;
+  artifactBytes: number;
+  applicationKey: string;
+  version: string;
+  dockerfileMode: "preserved" | "generated";
+  manifestStatus: "contract_validated";
+  buildStatus: "not_checked";
+  runtimeStatus: "not_checked";
+  qualificationStatus: "not_checked";
+  publisherSubmissionEligible: false;
+  message: string;
+};
+
+export type GenerateAapsConfig = {
+  appKey: string; appName: string; version: string;
+  routesJson: string; schemaJson: string; outputDir: "dist" | "build";
+};
+
+function draftForm(file: File, settings: GenerateAapsConfig, mode: "preview" | "download") {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("app_key", settings.appKey);
+  form.append("app_name", settings.appName);
+  form.append("version", settings.version);
+  form.append("routes_json", settings.routesJson);
+  form.append("schema_json", settings.schemaJson);
+  form.append("output_dir", settings.outputDir);
+  form.append("mode", mode);
+  return form;
+}
+
+export async function previewGeneratedAaps(publisherId: string, file: File, config: GenerateAapsConfig) {
+  const response = await api.post<GeneratedAapsDraft>(
+    `/api/v1/publishers/${publisherId}/containerization/generate`,
+    draftForm(file, config, "preview"),
+  );
+  return response.data;
+}
+
+export async function downloadGeneratedAaps(publisherId: string, file: File, config: GenerateAapsConfig) {
+  const response = await api.post<Blob>(
+    `/api/v1/publishers/${publisherId}/containerization/generate`,
+    draftForm(file, config, "download"), { responseType: "blob" },
+  );
+  return response.data;
+}
