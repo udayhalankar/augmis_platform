@@ -71,6 +71,27 @@ function ResultLine({ item }: { item: SourceValidationCheck }) {
   );
 }
 
+function releaseError(failure: unknown): string {
+  if (axios.isAxiosError(failure)) {
+    const d = failure.response?.data?.detail;
+    if (d && typeof d === "object") {
+      return `${String(d.code || "C1D54_ERROR")}: ${String(d.problem || d.message || "Publisher review failed")}. ${String(d.correction || "")}`;
+    }
+    if (typeof d === "string") return d;
+  }
+  return failure instanceof Error ? failure.message : "Publisher release action failed.";
+}
+
+// The server remains the only authority for trusted qualification.
+function assertExactReleaseReview(result: ContainerizationReleaseReview,
+                                  draft: RegisteredContainerizationDraft) {
+  if (result.artifactSha256 !== draft.artifactSha256 ||
+      result.packageId !== draft.packageId || result.versionId !== draft.versionId ||
+      result.buildId !== draft.buildId) {
+    throw new Error("C1D54_RELEASE_EVIDENCE_MISMATCH: Server review does not match registered artifact.");
+  }
+}
+
 export default function ContainerizeSourcePage() {
   const [publishers, setPublishers] = useState<PublisherWorkspace[]>([]);
   const [publisherId, setPublisherId] = useState("");
@@ -94,22 +115,17 @@ export default function ContainerizeSourcePage() {
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [releaseIssue, setReleaseIssue] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [qualificationAutoChecking, setQualificationAutoChecking] = useState(false);
+  const [qualificationAutoTimedOut, setQualificationAutoTimedOut] = useState(false);
+  // Shared between automatic polling and the existing manual Refresh button.
+  const releaseReviewInFlight = useRef(false);
   const draftRevision = useRef(0);
 
   function resetRelease() {
     setRegistered(null); setReleaseReview(null); setReleaseIssue(""); setSubmitted(false);
+    setQualificationAutoChecking(false); setQualificationAutoTimedOut(false);
   }
 
-  function releaseError(failure: unknown): string {
-    if (axios.isAxiosError(failure)) {
-      const d = failure.response?.data?.detail;
-      if (d && typeof d === "object") {
-        return `${String(d.code || "C1D54_ERROR")}: ${String(d.problem || d.message || "Publisher review failed")}. ${String(d.correction || "")}`;
-      }
-      if (typeof d === "string") return d;
-    }
-    return failure instanceof Error ? failure.message : "Publisher release action failed.";
-  }
 
   function updateConfig<K extends keyof GenerateAapsConfig>(key: K, value: GenerateAapsConfig[K]) {
     setConfig((c) => ({ ...c, [key]: value }));
@@ -329,23 +345,29 @@ export default function ContainerizeSourcePage() {
     } finally { setReleaseBusy(false); }
   }
 
+
   async function refreshReleaseReview() {
     const draft = registered;
-    if (!draft?.buildId || !passedPreflight || releaseBusy) return;
+    if (!draft?.buildId || !passedPreflight || releaseBusy || releaseReviewInFlight.current) return;
+    const revision = draftRevision.current;
+    releaseReviewInFlight.current = true;
     setReleaseBusy(true);
     setReleaseIssue("");
     try {
       const result = await getContainerizationReleaseReview(draft);
-      if (result.artifactSha256 !== draft.artifactSha256 ||
-          result.packageId !== draft.packageId || result.versionId !== draft.versionId ||
-          result.buildId !== draft.buildId) {
-        throw new Error("C1D54_RELEASE_EVIDENCE_MISMATCH: Server review does not match registered artifact.");
-      }
+      if (revision !== draftRevision.current) return;
+      assertExactReleaseReview(result, draft);
       setReleaseReview(result);
+      if (result.eligible || result.status === "failed") setQualificationAutoTimedOut(false);
     } catch (failure: unknown) {
-      setReleaseReview(null);
-      setReleaseIssue(releaseError(failure));
-    } finally { setReleaseBusy(false); }
+      if (revision === draftRevision.current) {
+        setReleaseReview(null);
+        setReleaseIssue(releaseError(failure));
+      }
+    } finally {
+      releaseReviewInFlight.current = false;
+      setReleaseBusy(false);
+    }
   }
 
   async function submitPublisherDraft() {
@@ -368,6 +390,87 @@ export default function ContainerizeSourcePage() {
       setReleaseReview(null);
     } finally { setReleaseBusy(false); }
   }
+
+  // C1-D5.4 UX only: a registered Docker build queues trusted C1-D2 work asynchronously.
+  // Poll the EXISTING read-only review endpoint until the worker finishes. Never run the
+  // worker, modify evidence, mark an unverified result Passed, or auto-submit a draft.
+  const qualificationFinished = Boolean(releaseReview?.eligible || releaseReview?.status === "failed");
+  useEffect(() => {
+    const draft = registered;
+    if (!draft?.buildId || !passedPreflight || submitted || qualificationFinished) {
+      setQualificationAutoChecking(false);
+      return;
+    }
+
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let checksMade = 0;
+    const revision = draftRevision.current;
+    const intervalMs = 4000;
+    const maxChecks = 75; // Five minutes; manual refresh remains available afterward.
+    setQualificationAutoChecking(true);
+    setQualificationAutoTimedOut(false);
+
+    const scheduleNext = () => {
+      if (active && revision === draftRevision.current) {
+        timer = setTimeout(() => { void checkOnce(); }, intervalMs);
+      }
+    };
+
+    const checkOnce = async () => {
+      if (!active || revision !== draftRevision.current) return;
+      if (releaseReviewInFlight.current) {
+        // A manual review is in flight. Respect the bounded polling window.
+        checksMade += 1;
+        if (checksMade >= maxChecks) {
+          setQualificationAutoChecking(false);
+          setQualificationAutoTimedOut(true);
+        } else scheduleNext();
+        return;
+      }
+      releaseReviewInFlight.current = true;
+      try {
+        const result = await getContainerizationReleaseReview(draft);
+        if (!active || revision !== draftRevision.current) return;
+        assertExactReleaseReview(result, draft);
+        setReleaseReview(result);
+        setReleaseIssue("");
+
+        // The ONLY retryable response is the existing worker's pending state.
+        // A failed, mismatched or other actionable result must remain blocked.
+        const pending = !result.eligible && result.code === "C1D2_QUALIFICATION_REQUIRED" &&
+          (result.qualificationStatus === "pending_smoke" ||
+           result.qualificationStatus === "not_started");
+        if (!pending) {
+          setQualificationAutoChecking(false);
+          return;
+        }
+      } catch (failure: unknown) {
+        if (active && revision === draftRevision.current) {
+          setReleaseReview(null);
+          setReleaseIssue(releaseError(failure));
+          setQualificationAutoChecking(false);
+        }
+        return; // Auth, integrity and network errors are not silently retried.
+      } finally {
+        releaseReviewInFlight.current = false;
+      }
+      checksMade += 1;
+      if (!active || revision !== draftRevision.current) return;
+      if (checksMade >= maxChecks) {
+        setQualificationAutoChecking(false);
+        setQualificationAutoTimedOut(true);
+        return;
+      }
+      scheduleNext();
+    };
+
+    void checkOnce(); // First server check automatically after the registered build appears.
+    return () => {
+      active = false; // Never apply a late response to another draft or an unmounted page.
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [registered, passedPreflight, submitted, qualificationFinished]);
 
   const checks = report?.checks.map((c) => {
     if (releaseReview && c.id === "qualification") {
@@ -543,6 +646,14 @@ export default function ContainerizeSourcePage() {
             </Button>
           </Stack>
           {releaseBusy && <CircularProgress size={18} sx={{ my: 1 }} />}
+          {qualificationAutoChecking && <Alert severity="info" sx={{ mt: 1 }}>
+            Trusted C1-D2 qualification is asynchronous. AUGMIS is checking the existing
+            qualification status automatically every 4 seconds; no repeated clicks are needed.
+          </Alert>}
+          {qualificationAutoTimedOut && <Alert severity="info" sx={{ mt: 1 }}>
+            Qualification is still pending after the automatic check window. Use
+            Refresh Trusted Qualification to check again; submission remains disabled.
+          </Alert>}
           {registered && <Typography sx={{ fontSize: 12, overflowWrap: "anywhere" }}>
             Package: <code>{registered.packageId}</code> · Version: <code>{registered.versionId}</code>
             {registered.buildId ? <> · Build: <code>{registered.buildId}</code></> : " · Not built"}
