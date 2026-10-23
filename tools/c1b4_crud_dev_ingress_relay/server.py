@@ -15,13 +15,28 @@ MAX_REQ = 1_048_576
 MAX_RES = 4_194_304
 
 
+# AUGMIS_C1D3_ASSET_ALLOWLIST_V1
+# Only immutable frontend build assets (not arbitrary paths or API endpoints).
+_ASSET_PATH = re.compile(
+    r'/assets/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.(?:js|css|svg|png|jpe?g|webp|woff2?)\Z'
+)
+
+
+def _asset_allowed(method, path):
+    return method == 'GET' and _ASSET_PATH.fullmatch(path) is not None
+
+
 def allowed(method, path):
+    if _asset_allowed(method, path):
+        return True
     return ((method == 'GET' and (path in {'/', '/health', '/api/records', '/api/summary'} or ITEM.fullmatch(path)))
             or (method == 'POST' and path == '/api/records')
             or (method in {'PUT', 'DELETE'} and ITEM.fullmatch(path)))
 
 
 def _declared_allowed(method, path, contracts, health):
+    if _asset_allowed(method, path):
+        return True
     if method == 'GET' and path in {'/', health}:
         return True
     if '%' in path or '?' in path or '#' in path or '\\' in path or '..' in path or '//' in path:

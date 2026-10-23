@@ -165,12 +165,13 @@ def _dockerfile(module: str, req: str, output_dir: str, has_lock: bool):
             "ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp\n"
             "WORKDIR /opt/app\n"
             f"COPY {req} ./requirements.txt\n"
-            "RUN pip install --no-cache-dir -r requirements.txt \\\n"
+            "RUN pip install --no-cache-dir --timeout 180 --retries 10 -r requirements.txt PyJWT==2.13.0 cryptography==46.0.4 \\\n"
             "    && groupadd --gid 10001 augmisapp \\\n"
             "    && useradd --uid 10001 --gid 10001 --no-create-home augmisapp\n"
             f"COPY {backend_folder}/ ./{backend_folder}/\n"
             f"COPY --from=ui-build --chown=10001:10001 /build/frontend/{output_dir}/ ./augmis-web/\n"
             "COPY augmis_generated_entry.py ./augmis_generated_entry.py\n"
+            "COPY augmis_runtime_guard.py ./augmis_runtime_guard.py\n"
             "USER 10001:10001\nEXPOSE 8080\n"
             'CMD ["uvicorn", "augmis_generated_entry:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]\n')
 
@@ -180,9 +181,20 @@ def _wrapper(module):
     return ("# Generated AUGMIS frontend adapter; route/auth security is tested in C1-D5.3.\n"
             "from importlib import import_module\n"
             "from fastapi.staticfiles import StaticFiles\n"
+            "from augmis_runtime_guard import AugmisRuntimeGuard\n"
             f"app = import_module({module_path!r}).app\n"
+            "app.add_middleware(AugmisRuntimeGuard)\n"
             'app.mount("/", StaticFiles(directory="/opt/app/augmis-web", html=True), name="augmis-web")\n')
 
+
+
+def _write_deterministic(out: zipfile.ZipFile, name: str, content: bytes | str):
+    """Pin ZIP metadata: preview/download must hash to the exact same artifact."""
+    member = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    member.create_system = 3
+    member.external_attr = 0o100644 << 16
+    member.compress_type = zipfile.ZIP_DEFLATED
+    out.writestr(member, content, compress_type=zipfile.ZIP_DEFLATED, compresslevel=6)
 
 def generate_aaps_zip(source: bytes, *, filename: str, app_key: str, app_name: str,
                       version: str, routes_json: str = "", schema_json: str = "", output_dir: str = "dist",
@@ -258,6 +270,9 @@ def generate_aaps_zip(source: bytes, *, filename: str, app_key: str, app_name: s
             generated_docker = None
         else:
             generated_docker = _dockerfile(module, req, output_dir, "frontend/package-lock.json" in mapping)
+        if generated_docker and "augmis_runtime_guard.py" in mapping:
+            _fail("GEN_RESERVED_RUNTIME_FILE", "Source conflicts with the reserved AUGMIS runtime guard.",
+                  "Remove augmis_runtime_guard.py from the source archive.", "augmis_runtime_guard.py")
         result = io.BytesIO()
         with zipfile.ZipFile(result, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as out:
             for rel in sorted(mapping):
@@ -268,12 +283,14 @@ def generate_aaps_zip(source: bytes, *, filename: str, app_key: str, app_name: s
                     data = reader.read(_MAX_SOURCE_SIZE + 1)
                 if len(data) > _MAX_SOURCE_SIZE:
                     _fail("GEN_FILE_LIMIT", "Oversized source member.", "Reduce file size.", rel)
-                out.writestr(rel, data)
-            out.writestr("augmis-app.yaml", yaml.safe_dump(manifest, sort_keys=False))
+                _write_deterministic(out, rel, data)
+            _write_deterministic(out, "augmis-app.yaml", yaml.safe_dump(manifest, sort_keys=False))
             if generated_docker:
-                out.writestr("Dockerfile", generated_docker)
-                out.writestr("augmis_generated_entry.py", _wrapper(module))
-                out.writestr(".dockerignore", ".git\nnode_modules\n.venv\n__pycache__\n.next\ndist\nbuild\n*.pyc\n.env\n")
+                _write_deterministic(out, "Dockerfile", generated_docker)
+                _write_deterministic(out, "augmis_generated_entry.py", _wrapper(module))
+                _write_deterministic(out, "augmis_runtime_guard.py",
+                    Path(__file__).with_name("c1d5_runtime_guard.py").read_bytes())
+                _write_deterministic(out, ".dockerignore", ".git\nnode_modules\n.venv\n__pycache__\n.next\ndist\nbuild\n*.pyc\n.env\n")
         generated = result.getvalue()
         # Reuse the actual existing AAPS ingestion contract before reporting a
         # draft as generated. This writes to a disposable local temp directory

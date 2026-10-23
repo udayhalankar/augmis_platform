@@ -65,6 +65,7 @@ from tools.validate_package import (
 
 from services.api.app.services.c1d5_source_analysis import analyze_source_zip
 from services.api.app.services.c1d5_aaps_generator import generate_aaps_zip, GenerationIssue
+from services.api.app.services.c1d5_build_test import build_test_draft, DraftBuildIssue
 from fastapi.responses import StreamingResponse
 
 from services.api.app.services.static_package_service import (
@@ -257,6 +258,146 @@ def generate_containerization_draft(
         return StreamingResponse(iter((artifact,)), media_type="application/zip", headers=headers)
     finally:
         file.file.close()
+
+
+@router.post("/publishers/{publisher_id}/containerization/build-test")
+def build_test_containerization_draft(
+    publisher_id: uuid.UUID,
+    file: UploadFile = File(...),
+    app_key: str = Form(...),
+    app_name: str = Form(...),
+    version: str = Form(...),
+    routes_json: str = Form(""),
+    schema_json: str = Form(""),
+    output_dir: str = Form("dist"),
+    expected_source_sha256: str = Form(...),
+    expected_artifact_sha256: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """C1-D5.3: build and disposable smoke only; NEVER upload/register/publish."""
+    publisher = db.get(Publisher, publisher_id)
+    if publisher is None:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+    try:
+        require_publisher_permission(
+            db=db, user=current_user, publisher_id=publisher.id,
+            permission_code="application.upload",
+        )
+    except AuthorizationError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail={
+            "code": "C1D53_SOURCE_ZIP_REQUIRED", "problem": "A source ZIP is required.",
+            "correction": "Select the same ZIP used for analysis and generation.",
+            "location": "Source ZIP",
+        })
+    if not (re.fullmatch(r"[a-f0-9]{64}", expected_source_sha256) and
+            re.fullmatch(r"[a-f0-9]{64}", expected_artifact_sha256)):
+        raise HTTPException(status_code=422, detail={
+            "code": "C1D53_DIGEST_FORMAT", "problem": "An expected SHA-256 is invalid.",
+            "correction": "Re-analyze the ZIP and generate the AAPS draft.",
+            "location": "Source/draft SHA-256",
+        })
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    try:
+        source = file.file.read(max_bytes + 1)
+        if len(source) > max_bytes:
+            raise HTTPException(status_code=413, detail={
+                "code": "C1D53_SOURCE_TOO_LARGE", "problem": "Source ZIP exceeds upload limit.",
+                "correction": "Remove dependencies/build outputs from the ZIP.",
+                "location": "Source ZIP",
+            })
+        try:
+            return build_test_draft(
+                source, filename=file.filename, app_key=app_key, app_name=app_name,
+                version=version, routes_json=routes_json, schema_json=schema_json,
+                output_dir=output_dir, expected_source_sha256=expected_source_sha256,
+                expected_artifact_sha256=expected_artifact_sha256,
+                max_upload_bytes=max_bytes,
+            )
+        except GenerationIssue as error:
+            raise HTTPException(status_code=422, detail=error.as_dict()) from error
+        except DraftBuildIssue as error:
+            raise HTTPException(status_code=409, detail=error.as_dict()) from error
+    finally:
+        file.file.close()
+
+
+
+
+# C1-D5.4: publisher review and submission remain separate from publication.
+# Authoritative evidence comes from the registered package/build and trusted C1-D2 gate.
+from services.api.app.services.c1d5_publisher_submission import (
+    PublisherSubmissionIssue, release_review,
+)
+
+
+def _c1d54_permission(db: Session, current_user: User, publisher_id: uuid.UUID):
+    publisher = db.get(Publisher, publisher_id)
+    if publisher is None:
+        raise HTTPException(status_code=404, detail="Publisher not found")
+    for code in ("application.upload", "application.manage"):
+        try:
+            require_publisher_permission(db=db, user=current_user,
+                publisher_id=publisher_id, permission_code=code)
+        except AuthorizationError as error:
+            raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@router.get("/publishers/{publisher_id}/containerization/release-review")
+def containerization_release_review(
+    publisher_id: uuid.UUID,
+    package_id: uuid.UUID,
+    version_id: uuid.UUID,
+    build_id: uuid.UUID,
+    artifact_sha256: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _c1d54_permission(db, current_user, publisher_id)
+    try:
+        return release_review(db, publisher_id=publisher_id, package_id=package_id,
+            version_id=version_id, build_id=build_id,
+            expected_artifact_sha256=artifact_sha256)
+    except PublisherSubmissionIssue as error:
+        raise HTTPException(status_code=409, detail=error.as_dict()) from error
+
+
+@router.post("/publishers/{publisher_id}/containerization/submit")
+def submit_qualified_containerization_draft(
+    publisher_id: uuid.UUID,
+    package_id: uuid.UUID = Form(...),
+    version_id: uuid.UUID = Form(...),
+    build_id: uuid.UUID = Form(...),
+    artifact_sha256: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Auditable handover of a QUALIFIED draft; never publishes it or creates an offer."""
+    _c1d54_permission(db, current_user, publisher_id)
+    try:
+        review = release_review(db, publisher_id=publisher_id, package_id=package_id,
+            version_id=version_id, build_id=build_id,
+            expected_artifact_sha256=artifact_sha256)
+    except PublisherSubmissionIssue as error:
+        raise HTTPException(status_code=409, detail=error.as_dict()) from error
+    if not review["eligible"]:
+        raise HTTPException(status_code=409, detail={
+            "code": review["code"], "problem": review["problem"],
+            "correction": review["correction"], "status": review["status"],
+        })
+    # Existing version remains draft. An audited review handoff is NOT an offer or publication.
+    record_audit_event(db=db, action="application.version.containerization.submitted",
+        resource_type="application_version", resource_id=version_id,
+        publisher_id=publisher_id, actor_user_id=current_user.id,
+        metadata={"packageId": str(package_id), "buildId": str(build_id),
+                  "artifactSha256": artifact_sha256,
+                  "immutableImageId": review["immutableImageId"]},
+        message="Qualified containerized application draft submitted for Publisher review.")
+    db.commit()
+    return {**review, "status": "SUBMITTED_DRAFT", "publicationStatus": "draft",
+            "message": "Qualified draft submitted to Publisher review; not published."}
 
 
 @router.post(

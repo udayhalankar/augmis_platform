@@ -615,3 +615,138 @@ export async function downloadGeneratedAaps(publisherId: string, file: File, con
   );
   return response.data;
 }
+
+
+// C1-D5.3: pre-submission execution of existing Docker build and disposable smoke services.
+// This is NOT trusted Publisher submission evidence; the server-side C1-D2 gate remains intact.
+export type DraftBuildTestCheck = Pick<SourceValidationCheck,
+  "id" | "status" | "code" | "location" | "problem" | "correction">;
+
+export type DraftBuildTestResult = {
+  stage: "C1-D5.3";
+  sourceSha256: string;
+  artifactSha256: string;
+  buildStatus: "passed" | "failed" | "action_required" | "not_checked";
+  runtimeStatus: "passed" | "failed" | "action_required" | "not_checked";
+  qualificationStatus: "not_checked";
+  imageId: string | null;
+  buildLog: string;
+  smokeChecks: Record<string, boolean>;
+  checks: Record<"build" | "runtime" | "qualification", DraftBuildTestCheck>;
+  publisherSubmissionEligible: false;
+};
+
+export async function runPublisherDraftBuildTest(
+  publisherId: string, file: File, config: GenerateAapsConfig,
+  expectedSourceSha256: string, expectedArtifactSha256: string,
+): Promise<DraftBuildTestResult> {
+  const form = draftForm(file, config, "preview");
+  form.delete("mode");
+  form.append("expected_source_sha256", expectedSourceSha256);
+  form.append("expected_artifact_sha256", expectedArtifactSha256);
+  const response = await api.post<DraftBuildTestResult>(
+    `/api/v1/publishers/${publisherId}/containerization/build-test`, form,
+  );
+  return response.data;
+}
+
+
+// C1-D5.4 uses only existing registry/build lifecycle plus a server-side C1-D2 gate.
+export type RegisteredContainerizationDraft = {
+  publisherId: string;
+  packageId: string;
+  versionId: string;
+  buildId: string | null;
+  artifactSha256: string;
+};
+
+export type ContainerizationReleaseReview = {
+  status: string;
+  eligible: boolean;
+  code: string;
+  problem: string;
+  correction: string;
+  qualificationStatus: string;
+  qualificationFailureCode: string | null;
+  artifactSha256: string;
+  immutableImageId: string;
+  packageId: string;
+  versionId: string;
+  buildId: string;
+  publicationStatus?: "draft";
+  message?: string;
+};
+
+export async function getContainerizationReleaseReview(draft: RegisteredContainerizationDraft) {
+  if (!draft.buildId) throw new Error("Build this registered draft before release review.");
+  const response = await api.get<ContainerizationReleaseReview>(
+    `/api/v1/publishers/${draft.publisherId}/containerization/release-review`,
+    { params: { package_id: draft.packageId, version_id: draft.versionId,
+        build_id: draft.buildId, artifact_sha256: draft.artifactSha256 } },
+  );
+  return response.data;
+}
+
+export async function submitQualifiedContainerizationDraft(draft: RegisteredContainerizationDraft) {
+  if (!draft.buildId) throw new Error("Registered build is required.");
+  const form = new FormData();
+  form.append("package_id", draft.packageId);
+  form.append("version_id", draft.versionId);
+  form.append("build_id", draft.buildId);
+  form.append("artifact_sha256", draft.artifactSha256);
+  const response = await api.post<ContainerizationReleaseReview>(
+    `/api/v1/publishers/${draft.publisherId}/containerization/submit`, form,
+  );
+  return response.data;
+}
+
+
+
+// C1-D5.4 recovery only: read existing publisher/version records; NEVER upload or mutate.
+// The existing backend release-review remains authoritative for release eligibility.
+export async function resumeExistingContainerizationDraft(
+  publisherId: string, appKey: string, version: string, artifactSha256: string,
+): Promise<RegisteredContainerizationDraft> {
+  const applications = await loadPublisherApplications(publisherId);
+  const application = applications.find((candidate) => candidate.appKey === appKey);
+  if (!application) {
+    throw new Error("C1D54_RESUME_NOT_FOUND: No registered application with this key belongs to the selected publisher.");
+  }
+  const response = await api.get<ApplicationVersionList>(
+    `/api/v1/applications/${application.id}/versions`,
+  );
+  if (response.data.application.publisherId !== publisherId ||
+      response.data.application.appKey !== appKey) {
+    throw new Error("C1D54_RESUME_SCOPE: Registered application does not match this publisher/key.");
+  }
+  const item = response.data.items.find((candidate) => candidate.version === version);
+  if (!item) {
+    throw new Error("C1D54_RESUME_VERSION_NOT_FOUND: No previously registered version matches this draft.");
+  }
+  const detail = await loadApplicationVersionDetail(item.id);
+  if (detail.id !== item.id || detail.version !== version ||
+      detail.application.id !== application.id ||
+      detail.application.publisherId !== publisherId ||
+      detail.application.appKey !== appKey ||
+      detail.publicationStatus !== "draft" || detail.buildType !== "dockerfile") {
+    throw new Error("C1D54_RESUME_NOT_DRAFT: Existing version is not the selected unpublished Docker draft.");
+  }
+  if (!detail.package || detail.package.status !== "validated" ||
+      detail.package.sha256 !== artifactSha256) {
+    throw new Error("C1D54_RESUME_SHA_MISMATCH: Registered ZIP does not match the exact currently generated and tested artifact. No recovery performed.");
+  }
+  return {
+    publisherId,
+    packageId: detail.package.id,
+    versionId: detail.id,
+    buildId: detail.latestBuild?.status === "ready" ? detail.latestBuild.id : null,
+    artifactSha256,
+  };
+}
+
+// Compare the exact binary ZIP delivered by the generator before registering it.
+export async function exactAapsBlobSha256(blob: Blob): Promise<string> {
+  const bytes = await blob.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (n) => n.toString(16).padStart(2, "0")).join("");
+}
