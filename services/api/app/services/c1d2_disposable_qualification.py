@@ -17,6 +17,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -78,6 +79,74 @@ def _http(url: str, token: str | None = None) -> int:
         return exc.code
     except (URLError, OSError):
         return 0
+
+
+class _FrontendAssetParser(HTMLParser):
+    """Find same-origin compiled JS/CSS referenced by application HTML."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.assets: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag, attrs):
+        data = dict(attrs)
+        candidate = None
+        if tag == 'script':
+            candidate = data.get('src')
+        elif tag == 'link' and 'stylesheet' in (data.get('rel') or '').lower().split():
+            candidate = data.get('href')
+        if not candidate:
+            return
+        # React/Vite output supports /assets/* and ./assets/*. Prevent absolute
+        # cross-origin fetches and untrusted traversal during qualification.
+        raw = candidate[2:] if candidate.startswith('./') else candidate.lstrip('/')
+        if not re.fullmatch(r'assets/[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.(?:js|css)', raw):
+            return
+        self.assets.append(('/' + raw, 'css' if raw.endswith('.css') else 'js'))
+
+
+def _verify_frontend_assets(address: str) -> None:
+    """Exercise the real relay path and correct JS/CSS MIME before release.
+
+    A backend-only app may have no root HTML, in which case there is no
+    declared compiled asset to check. Generated React images always serve HTML.
+    """
+    try:
+        try:
+            root = urlopen(Request(address + '/', headers={'Cache-Control':'no-store'}), timeout=8)
+        except HTTPError as exc:
+            # Existing backend-only apps may intentionally lack GET /.
+            if exc.code in {404, 405}:
+                exc.close()
+                return
+            raise
+        with root as response:
+            if response.status != 200:
+                raise QualificationFailure('C1D2_FRONTEND_ROOT_FAILED')
+            body = response.read(131073)
+            if len(body) > 131072:
+                raise QualificationFailure('C1D2_FRONTEND_HTML_TOO_LARGE')
+            mime = (response.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+            if mime != 'text/html':
+                # A response pretending to be HTML must not bypass asset checks.
+                if b'<script' in body or b'<link' in body:
+                    raise QualificationFailure('C1D2_FRONTEND_HTML_MIME_INVALID')
+                return
+        parser = _FrontendAssetParser()
+        parser.feed(body.decode('utf-8', errors='replace'))
+        if len(parser.assets) > 12:
+            raise QualificationFailure('C1D2_FRONTEND_ASSET_COUNT_INVALID')
+        for path, kind in parser.assets:
+            with urlopen(Request(address + path, headers={'Cache-Control':'no-store'}), timeout=8) as response:
+                mime = (response.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+                allowed = {'text/css'} if kind == 'css' else {'text/javascript','application/javascript'}
+                if response.status != 200 or mime not in allowed:
+                    raise QualificationFailure('C1D2_FRONTEND_ASSET_SMOKE_FAILED')
+                response.read(1)
+    except QualificationFailure:
+        raise
+    except (HTTPError, URLError, OSError, TimeoutError, ValueError):
+        raise QualificationFailure('C1D2_FRONTEND_ASSET_SMOKE_FAILED') from None
 
 
 def _jwt(private: Ed25519PrivateKey, *, tenant: uuid.UUID, app: uuid.UUID,
@@ -286,6 +355,7 @@ class DisposableQualification:
                     time.sleep(2)
                 else:
                     raise QualificationFailure('C1D2_RUNTIME_HEALTH_TIMEOUT')
+                _verify_frontend_assets(address)
                 checked['internal_health'] = True
                 endpoint = address + self.get_path
                 unsigned = _http(endpoint)

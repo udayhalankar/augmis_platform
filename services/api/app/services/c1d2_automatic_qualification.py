@@ -24,7 +24,7 @@ from services.api.app.services.c1d2_disposable_qualification import (
 from services.api.app.core.runtime_host import read_profile
 from services.api.app.services.runtime_host_readiness import check_runtime_host
 
-REVISION = 'c1d2-disposable-1'
+REVISION = 'c1d2-disposable-2'
 SMOKE_KEYS = ('image_identity', 'database_isolation', 'schema_rls',
               'internal_health', 'gateway_auth', 'gateway_rejection')
 

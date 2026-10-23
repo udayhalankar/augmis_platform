@@ -240,6 +240,24 @@ def generate_aaps_zip(source: bytes, *, filename: str, app_key: str, app_name: s
         pg_detected = "postgresql" in report["detectedStack"]
         routes = _routes(routes_json, preexisting, zf, mapping)
         addons = _database(schema_json, preexisting, zf, mapping, pg_detected)
+        # C1-D3: catch known direct-psycopg/RLS incompatibilities before build.
+        # Does not attempt to certify arbitrary SQLAlchemy/ORM application logic.
+        if addons and (addons.get("database") or {}).get("schema"):
+            from services.api.app.services.c1d3_source_db_contract import (
+                SourceDbContractError, check_direct_psycopg_contract,
+            )
+            backend_sources = {}
+            pyfiles = sorted(n for n in mapping if n.endswith(".py") and
+                             (n.startswith("app/") or n.startswith("backend/")))
+            if len(pyfiles) > 100:
+                _fail("GEN_DB_AUDIT_FILE_LIMIT", "Too many backend Python files to inspect safely.",
+                      "Reduce the backend source to at most 100 Python files.", "Backend source")
+            for name in pyfiles:
+                backend_sources[name] = _read(zf, mapping, name, limit=512 * 1024)
+            try:
+                check_direct_psycopg_contract(backend_sources, addons["database"]["schema"])
+            except SourceDbContractError as issue:
+                _fail(issue.code, issue.problem, issue.correction, issue.file)
         # Existing AAPS declarations can be retained, but cannot bypass contract checks.
         manifest: dict[str, Any] = {
             "apiVersion": "apps.augmis.com/v1alpha1", "kind": "Application",
