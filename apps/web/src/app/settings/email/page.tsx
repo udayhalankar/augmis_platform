@@ -22,9 +22,8 @@ import SaveOutlined from "@mui/icons-material/SaveOutlined";
 import SendOutlined from "@mui/icons-material/SendOutlined";
 
 import { useEffect, useState } from "react";
+import AdministrationTabs from "@/components/administration-tabs";
 
-import AppShell from "@/components/app-shell";
-import ProtectedRoute from "@/components/protected-route";
 import {
   loadPlatformEmailSettings,
   savePlatformEmailSettings,
@@ -217,55 +216,15 @@ export default function EmailSettingsPage() {
   };
 
   return (
-    <ProtectedRoute>
-      <AppShell>
+    <>
         <Box>
-          <Stack
-            direction={{
-              xs: "column",
-              md: "row",
-            }}
-            spacing={2}
-            sx={{
-              alignItems: {
-                xs: "flex-start",
-                md: "center",
-              },
-              justifyContent:
-                "space-between",
-              mb: 3,
-            }}
-          >
-            <Box>
-              <Typography
-                sx={{
-                  fontSize: 11,
-                  color:
-                    "text.secondary",
-                  letterSpacing: 0.8,
-                  textTransform:
-                    "uppercase",
-                  mb: 0.5,
-                }}
-              >
-                Platform Administration
-              </Typography>
-
-              <Typography variant="h4">
-                Email Delivery
-              </Typography>
-
-              <Typography
-                sx={{
-                  mt: 0.75,
-                  color:
-                    "text.secondary",
-                }}
-              >
-                Configure transactional email for invitations and platform notifications.
-              </Typography>
-            </Box>
-
+          <Box sx={{ border: "1px solid", borderColor: "divider", bgcolor: "background.paper", mb: 0 }}>
+            <AdministrationTabs
+              value="delivery"
+              tabs={[{ value: "delivery", label: "Email Delivery" }]}
+              ariaLabel="Email delivery tabs"
+              action={
+                <>
             {settings && (
               <Stack
                 direction="row"
@@ -304,7 +263,10 @@ export default function EmailSettingsPage() {
                 />
               </Stack>
             )}
-          </Stack>
+                </>
+              }
+            />
+          </Box>
 
           {error && (
             <Alert
@@ -782,7 +744,6 @@ export default function EmailSettingsPage() {
             </Stack>
           )}
         </Box>
-      </AppShell>
-    </ProtectedRoute>
+    </>
   );
 }

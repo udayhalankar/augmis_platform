@@ -25,8 +25,6 @@ import {
   Divider,
   FormControlLabel,
   Stack,
-  Tab,
-  Tabs,
   Typography,
 } from "@mui/material";
 
@@ -37,14 +35,10 @@ import {
   SaveOutlined,
 } from "@mui/icons-material";
 
-import AppShell
-  from "@/components/app-shell";
-
 import PermissionGuard
   from "@/components/permission-guard";
 
-import ProtectedRoute
-  from "@/components/protected-route";
+import AdministrationTabs from "@/components/administration-tabs";
 
 import {
   loadRbacPermissions,
@@ -394,9 +388,7 @@ export default function RbacPage() {
 
 
   return (
-    <ProtectedRoute>
-
-      <AppShell>
+    <>
 
         <PermissionGuard
           scope="platform"
@@ -406,76 +398,6 @@ export default function RbacPage() {
 
           <Box>
 
-            <Box
-              sx={{
-                display: "flex",
-                justifyContent:
-                  "space-between",
-                alignItems:
-                  "flex-start",
-                gap: 2,
-                flexWrap: "wrap",
-                mb: 3,
-              }}
-            >
-
-              <Box>
-
-                <Typography
-                  sx={{
-                    fontSize: 12,
-                    color:
-                      "text.secondary",
-                    textTransform:
-                      "uppercase",
-                    letterSpacing:
-                      0.8,
-                    mb: 0.5,
-                  }}
-                >
-                  Platform Administration
-                </Typography>
-
-                <Typography
-                  variant="h4"
-                >
-                  RBAC Administration
-                </Typography>
-
-                <Typography
-                  sx={{
-                    mt: 0.5,
-                    color:
-                      "text.secondary",
-                  }}
-                >
-                  Review roles and manage
-                  role-permission assignments
-                  across AUGMIS security scopes.
-                </Typography>
-
-              </Box>
-
-
-              <Button
-                variant="outlined"
-                startIcon={
-                  <RefreshOutlined />
-                }
-                disabled={
-                  loading
-                }
-                onClick={
-                  () =>
-                    loadData(
-                      scope
-                    )
-                }
-              >
-                Refresh
-              </Button>
-
-            </Box>
 
 
             {message && (
@@ -517,48 +439,21 @@ export default function RbacPage() {
               }}
             >
 
-              <Box
-                sx={{
-                  px: 2,
-                  pt: 1,
-                }}
-              >
-
-                <Tabs
-                  value={
-                    scope
-                  }
-                  onChange={
-                    (
-                      _event,
-                      value:
-                        RbacScope
-                    ) =>
-                      setScope(
-                        value
-                      )
-                  }
-                >
-                  <Tab
-                    value="tenant"
-                    label="Tenant"
-                  />
-
-                  <Tab
-                    value="publisher"
-                    label="Publisher"
-                  />
-
-                  <Tab
-                    value="platform"
-                    label="Platform"
-                  />
-                </Tabs>
-
-              </Box>
-
-              <Divider />
-
+              <AdministrationTabs
+                value={scope}
+                tabs={[
+                  { value: "tenant", label: "Tenant" },
+                  { value: "publisher", label: "Publisher" },
+                  { value: "platform", label: "Platform" },
+                ]}
+                ariaLabel="RBAC security scopes"
+                onChange={(value) => setScope(value as RbacScope)}
+                action={
+                  <Button variant="outlined" startIcon={<RefreshOutlined />} disabled={loading} onClick={() => void loadData(scope)}>
+                    Refresh
+                  </Button>
+                }
+              />
 
               {loading ? (
 
@@ -1075,8 +970,6 @@ export default function RbacPage() {
 
         </PermissionGuard>
 
-      </AppShell>
-
-    </ProtectedRoute>
+    </>
   );
 }

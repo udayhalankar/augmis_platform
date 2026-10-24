@@ -52,3 +52,10 @@ class UserResponse(BaseModel):
     last_name: str
 
     status: str
+
+class SessionTokenResponse(TokenResponse):
+    idleMinutes: int
+    lastActivityAt: str
+    idleDeadline: str
+    absoluteDeadline: str
+    accessExpiresInSeconds: int

@@ -18,6 +18,8 @@ from sqlalchemy.orm import Session
 from services.api.app.db.session import get_db
 
 from services.api.app.models.iam import User
+from services.api.app.models.session_security import AuthSession
+from services.api.app.services.session_security import check_session, SessionDenied
 
 from services.api.app.services.auth_service import (
     decode_access_token
@@ -55,9 +57,8 @@ def get_current_user(
                 "Invalid token type"
             )
 
-        user_id = uuid.UUID(
-            payload["sub"]
-        )
+        user_id = uuid.UUID(payload["sub"])
+        session_id = uuid.UUID(payload["sid"])
 
     except (
         jwt.InvalidTokenError,
@@ -70,10 +71,15 @@ def get_current_user(
             detail="Invalid or expired access token"
         )
 
-    user = db.get(
-        User,
-        user_id
-    )
+    auth_session = db.get(AuthSession, session_id)
+    if auth_session is None or auth_session.user_id != user_id:
+        raise HTTPException(status_code=401, detail="SESSION_NOT_FOUND")
+    try:
+        check_session(db, auth_session)
+    except SessionDenied as exc:
+        raise HTTPException(status_code=401, detail=exc.code) from exc
+
+    user = db.get(User, user_id)
 
     if not user:
 

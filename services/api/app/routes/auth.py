@@ -2,7 +2,9 @@
 from fastapi import (
     APIRouter,
     Depends,
-    HTTPException
+    HTTPException,
+    Request,
+    Response,
 )
 
 from sqlalchemy import select
@@ -23,16 +25,18 @@ from services.api.app.models.iam import (
 from services.api.app.schemas.auth import (
     LoginRequest,
     RegisterRequest,
-    TokenResponse,
+    SessionTokenResponse,
     UserResponse
 )
 
 from services.api.app.services.auth_service import (
-    create_access_token,
     hash_password,
     normalize_email,
     verify_password
 )
+
+from services.api.app.routes.session_security import assert_origin, set_cookie, reply_session
+from services.api.app.services.session_security import create_session
 
 from services.api.app.services.audit_service import (
     record_audit_event,
@@ -112,12 +116,15 @@ def register(
 
 @router.post(
     "/login",
-    response_model=TokenResponse
+    response_model=SessionTokenResponse
 )
 def login(
     payload: LoginRequest,
+    request: Request,
+    response: Response,
     db: Session = Depends(get_db)
 ):
+    assert_origin(request)
 
     normalized = normalize_email(
         str(payload.email)
@@ -200,9 +207,7 @@ def login(
             detail="Account is not active"
         )
 
-    token = create_access_token(
-        str(user.id)
-    )
+    session, refresh_secret, token = create_session(db, user)
 
     record_audit_event(
         db,
@@ -219,9 +224,8 @@ def login(
 
     db.commit()
 
-    return TokenResponse(
-        access_token=token
-    )
+    set_cookie(response, session.id, refresh_secret)
+    return reply_session(db, session, token)
 
 
 @router.get(

@@ -1,3 +1,5 @@
+import secrets
+
 from datetime import (
     datetime,
     timedelta,
@@ -42,7 +44,7 @@ def verify_password(
 
 
 def create_access_token(
-    user_id: str
+    user_id: str, *, session_id: str
 ) -> str:
 
     now = datetime.now(
@@ -50,11 +52,13 @@ def create_access_token(
     )
 
     expiry = now + timedelta(
-        minutes=settings.access_token_minutes
+        minutes=settings.session_access_minutes
     )
 
     payload = {
         "sub": user_id,
+        "sid": session_id,
+        "jti": secrets.token_urlsafe(16),
         "iat": now,
         "exp": expiry,
         "type": "access"

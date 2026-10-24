@@ -280,3 +280,12 @@ async def _c1d_lifespan(asgi_app: FastAPI):
 
 
 app.router.lifespan_context = _c1d_lifespan
+
+# C1-D4: reuse existing FastAPI auth dependency; add session lifecycle and admin settings.
+from services.api.app.routes import session_security as c1d4_session_routes
+# Fail startup rather than silently set an insecure production session cookie.
+c1d4_session_routes.cookie_name()
+if settings.app_env.lower() in ("production", "prod"):
+    if settings.jwt_algorithm not in ("HS256", "HS384", "HS512") or len(settings.jwt_secret) < 32:
+        raise RuntimeError("Production JWT configuration requires an approved HMAC algorithm and 32+ byte secret")
+app.include_router(c1d4_session_routes.router)

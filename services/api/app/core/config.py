@@ -28,7 +28,11 @@ class Settings(BaseSettings):
 
     jwt_algorithm: str = "HS256"
 
-    access_token_minutes: int = 60
+    access_token_minutes: int = 60  # Legacy setting; new sessions use session_access_minutes.
+    session_access_minutes: int = 10
+    session_default_idle_minutes: int = 30
+    session_absolute_hours: int = 24
+    session_cookie_secure: bool = False  # Development only; production validates HTTPS below.
     settings_encryption_key: str = ""
 
     frontend_base_url: str = (

@@ -76,3 +76,6 @@ from services.api.app.models.deployment_reliability import (
     ApplicationBuildQualification,
     DeploymentOperationJournal,
 )
+
+# C1-D4 control-plane authentication; model metadata for Alembic.
+from services.api.app.models.session_security import AuthSession, SessionPolicy

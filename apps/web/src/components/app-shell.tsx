@@ -14,6 +14,7 @@ import {
   NotificationsNoneOutlined,
   PeopleOutlined,
   SettingsOutlined,
+  SecurityOutlined,
   StorefrontOutlined,
 } from "@mui/icons-material";
 
@@ -227,11 +228,10 @@ export default function AppShell({
 
   const handleLogout = () => {
 
-    logout();
+    void logout().catch(() => {
+      // Local state fails closed even if remote revocation could not be confirmed.
+    }).finally(() => router.replace("/login"));
 
-    router.replace(
-      "/login"
-    );
   };
 
 
@@ -435,7 +435,19 @@ export default function AppShell({
                     )
                 }
               >
-                {canManageEmailSettings && (
+                {hasSettingsAccess && (
+                  <MenuItem onClick={() => openSettingsPage("/settings")}>
+                    <ListItemIcon><SettingsOutlined fontSize="small" /></ListItemIcon>
+                    <ListItemText primary="Administration" />
+                  </MenuItem>
+              )}
+              {canManageEmailSettings && (
+                  <MenuItem onClick={() => openSettingsPage("/settings/security")}>
+                    <ListItemIcon><SecurityOutlined fontSize="small" /></ListItemIcon>
+                    <ListItemText primary="Session Security" />
+                  </MenuItem>
+              )}
+              {canManageEmailSettings && (
                   <MenuItem
                     onClick={
                       () =>
@@ -797,11 +809,7 @@ export default function AppShell({
       <Box
         component="main"
         sx={{
-          px: {
-            xs: 2,
-            md: 3,
-          },
-
+          px: { xs: 2, md: 3 },
           py: 3,
         }}
       >
