@@ -7,7 +7,7 @@ import time
 import uuid
 import jwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
-from services.api.app.services.private_crud_runtime import CrudRuntimeError, _expected_application, signing_material
+from services.api.app.services.private_crud_runtime import CrudRuntimeError, _expected_application, signing_material, signing_private_key_bytes
 from services.api.app.core.config import settings
 
 ROUTE = re.compile(r'/api/(?:summary|records(?:/[0-9a-f-]{36})?)\Z')
@@ -31,7 +31,7 @@ def make_crud_request_assertion(*, context: dict, method: str,
             (method in {'PUT', 'DELETE'} and ITEM.fullmatch(path))):
         raise CrudRuntimeError('C1B4_OPERATION_NOT_ALLOWED')
     private, _ = signing_material()
-    signer = load_pem_private_key(private.read_bytes(), password=None)
+    signer = load_pem_private_key(signing_private_key_bytes(private), password=None)
     now = int(time.time())
     claims = {
         'iss': 'augmis.control-plane',

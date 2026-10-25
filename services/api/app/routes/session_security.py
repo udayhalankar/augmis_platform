@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from services.api.app.core.auth import get_current_user
-from services.api.app.core.config import settings
+from services.api.app.core.config import settings, validate_production_ingress_config
 from services.api.app.db.session import get_db
 from services.api.app.models.iam import User
 from services.api.app.models.platform import Tenant
@@ -35,17 +35,22 @@ class IdlePolicyUpdate(BaseModel):
 
 
 def cookie_name() -> str:
-    if settings.app_env.lower() in ("production", "prod"):
-        if not settings.session_cookie_secure or not settings.frontend_base_url.startswith("https://"):
-            raise RuntimeError("Production auth requires HTTPS and SESSION_COOKIE_SECURE=true")
+    if settings.app_env.strip().lower() in ("production", "prod"):
+        validate_production_ingress_config(settings)
         return COOKIE_PROD
     return COOKIE_DEV
 
 
 def assert_origin(request: Request) -> None:
     origin = request.headers.get("origin", "")
-    allowed = set(settings.cors_origin_list) | {settings.frontend_base_url.rstrip("/")}
-    if origin.rstrip("/") not in allowed or request.headers.get("x-augmis-csrf") != "1":
+    if settings.app_env.strip().lower() in ("production", "prod"):
+        # Do not widen the session-CSRF trust boundary with CORS entries,
+        # Host-derived URLs or client-supplied forwarding headers.
+        expected, _ = validate_production_ingress_config(settings)
+        allowed = origin == expected
+    else:
+        allowed = origin.rstrip("/") in (set(settings.cors_origin_list) | {settings.frontend_base_url.rstrip("/")})
+    if not allowed or request.headers.get("x-augmis-csrf") != "1":
         raise HTTPException(status_code=403, detail="SESSION_ORIGIN_DENIED")
 
 

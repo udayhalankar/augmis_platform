@@ -897,6 +897,8 @@ return NextResponse.redirect(
             "manual",
           cache:
             "no-store",
+          // R04: bounded upstream wait; no automatic retry or session bypass.
+          signal: AbortSignal.timeout(30000),
         }
       );
   } catch (error) {

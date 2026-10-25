@@ -1,9 +1,11 @@
-"""C1-D1: durable, explicitly opted-in *development* runtime-host configuration.
+"""C1-D1 development profile and R02 fail-closed production-host profile.
 
 Loads a non-secret host profile from the service account's home directory. Existing
 runtime services still consume their established environment variables; this is
 an early, single-source adapter, NOT a second container/deployment engine.
 
+Production profiles are configuration contracts only: they never enable a
+container launch without a separately accepted private ingress adapter.
 This module deliberately has no Docker or application-model imports on import.
 """
 from __future__ import annotations
@@ -22,6 +24,12 @@ PROFILE_FILENAME = 'runtime-host.json'
 PROFILE_OVERRIDE_ENV = 'AUGMIS_RUNTIME_PROFILE_FILE'
 _ID = re.compile(r'sha256:[0-9a-f]{64}\Z')
 _NETWORK = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}\Z')
+_PRODUCTION_PROFILE_KEYS = frozenset({
+    'schemaVersion', 'environment', 'hostPlatform', 'deploymentMode',
+    'postgresImageId', 'genericRelayImageId', 'ingressNetwork',
+    'signingPrivateKeyFile', 'signingPublicKeyFile',
+    'allowHostPortPublishing',
+})
 _PROFILE_KEYS = frozenset({
     'schemaVersion', 'environment', 'postgresImageId', 'genericRelayImageId',
     'legacyCrudRelayImageId', 'legacyCrudApplicationId', 'enableLegacyCrud',
@@ -68,8 +76,46 @@ def _normal_path(value: str, key: str) -> str:
     return str(p)
 
 
+def _parse_production(data: dict) -> dict[str, str]:
+    """Validate a *non-activating* Linux EC2 private-ingress configuration.
+
+    No development enablement flags, direct host-port option, legacy CRUD mode,
+    or publisher-supplied Docker options are accepted in schema v2.
+    """
+    if set(data) != _PRODUCTION_PROFILE_KEYS:
+        raise RuntimeProfileError('R02_PROFILE_SCHEMA_INVALID')
+    if data.get('environment') != 'production':
+        raise RuntimeProfileError('R02_PROFILE_ENV_INVALID')
+    if data.get('hostPlatform') != 'aws-ec2-linux-docker':
+        raise RuntimeProfileError('R02_PROFILE_HOST_INVALID')
+    if data.get('deploymentMode') != 'private-gateway-only':
+        raise RuntimeProfileError('R02_PROFILE_MODE_INVALID')
+    if data.get('allowHostPortPublishing') is not False:
+        raise RuntimeProfileError('R02_PROFILE_HOST_PORT_DENIED')
+    for name in ('postgresImageId', 'genericRelayImageId'):
+        if not _ID.fullmatch(_required_str(data, name)):
+            raise RuntimeProfileError('R02_PROFILE_IMAGE_UNPINNED')
+    ingress = _required_str(data, 'ingressNetwork')
+    if not _NETWORK.fullmatch(ingress) or ingress in ('bridge', 'host', 'none'):
+        raise RuntimeProfileError('R02_PROFILE_PRIVATE_INGRESS_INVALID')
+    private = _normal_path(_required_str(data, 'signingPrivateKeyFile'), 'signingPrivateKeyFile')
+    public = _normal_path(_required_str(data, 'signingPublicKeyFile'), 'signingPublicKeyFile')
+    return {
+        'AUGMIS_R02_PRODUCTION_PROFILE': '1',
+        'AUGMIS_R02_PRIVATE_INGRESS_NETWORK': ingress,
+        'AUGMIS_C1B_POSTGRES_IMAGE_ID': data['postgresImageId'],
+        'AUGMIS_C1C_GENERIC_RELAY_IMAGE_ID': data['genericRelayImageId'],
+        'AUGMIS_C1B_CRUD_SIGNING_PRIVATE_KEY_FILE': private,
+        'AUGMIS_C1B_CRUD_SIGNING_PUBLIC_KEY_FILE': public,
+    }
+
+
 def _parse(data: object) -> dict[str, str]:
-    if not isinstance(data, dict) or set(data) - _PROFILE_KEYS:
+    if not isinstance(data, dict):
+        raise RuntimeProfileError('C1D_PROFILE_SCHEMA_INVALID')
+    if data.get('schemaVersion') == 2 and type(data.get('schemaVersion')) is int:
+        return _parse_production(data)
+    if set(data) - _PROFILE_KEYS:
         raise RuntimeProfileError('C1D_PROFILE_SCHEMA_INVALID')
     if type(data.get('schemaVersion')) is not int or data['schemaVersion'] != 1:
         raise RuntimeProfileError('C1D_PROFILE_VERSION_UNSUPPORTED')
@@ -123,6 +169,7 @@ def _parse(data: object) -> dict[str, str]:
 class LoadedProfile:
     path: Path
     environment: Mapping[str, str]
+    mode: str = 'development'  # Preserve existing two-argument test/caller usage.
 
 
 def read_profile(path: Path | None = None) -> LoadedProfile | None:
@@ -143,7 +190,23 @@ def read_profile(path: Path | None = None) -> LoadedProfile | None:
         raise
     except (OSError, ValueError, UnicodeError) as exc:
         raise RuntimeProfileError('C1D_PROFILE_READ_FAILED') from exc
-    return LoadedProfile(path=selected, environment=MappingProxyType(_parse(raw)))
+    mapping = _parse(raw)
+    production = raw.get('schemaVersion') == 2
+    if production:
+        if path is None and not os.environ.get(PROFILE_OVERRIDE_ENV, '').strip():
+            raise RuntimeProfileError('R02_PRODUCTION_PROFILE_PATH_EXPLICIT_REQUIRED')
+        if os.name != 'posix' or (stat.S_IMODE(selected.stat().st_mode) & 0o077):
+            raise RuntimeProfileError('R02_PRODUCTION_PROFILE_PERMISSIONS')
+        if selected.stat().st_uid != os.geteuid():
+            raise RuntimeProfileError('R02_PRODUCTION_PROFILE_OWNER')
+        signing_private = Path(raw['signingPrivateKeyFile'])
+        private_stat = signing_private.stat()
+        if (stat.S_IMODE(private_stat.st_mode) & 0o077):
+            raise RuntimeProfileError('R02_SIGNING_PRIVATE_KEY_PERMISSIONS')
+        if private_stat.st_uid != os.geteuid():
+            raise RuntimeProfileError('R02_SIGNING_PRIVATE_KEY_OWNER')
+    return LoadedProfile(path=selected, environment=MappingProxyType(mapping),
+                         mode='production' if production else 'development')
 
 
 _LOADED: LoadedProfile | None = None

@@ -4,7 +4,22 @@ import {
   SessionTokens,
 } from "@/lib/auth-storage";
 
-export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
+// In production, normal API requests must use the ALB's same-origin /api/v1/*
+// routing. NEXT_PUBLIC_* values are exposed to browsers: never publish a
+// private service URL here. Keep the existing development fallback unchanged.
+export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ??
+  (process.env.NODE_ENV === "production" ? "" : "http://127.0.0.1:8000");
+
+function assertPublicApiBase(): void {
+  if (process.env.NODE_ENV !== "production" || typeof window === "undefined") return;
+  let url: URL;
+  try { url = new URL(apiBaseUrl || "/", window.location.origin); }
+  catch { throw new Error("R01_PUBLIC_API_ORIGIN_INVALID"); }
+  if (url.origin !== window.location.origin || url.pathname !== "/" || url.search || url.hash ||
+      url.username || url.password) {
+    throw new Error("R01_PUBLIC_API_ORIGIN_INVALID");
+  }
+}
 
 const authTransport = axios.create({ baseURL: "", withCredentials: true, headers: { "X-Augmis-CSRF": "1" } });
 export const api = axios.create({ baseURL: apiBaseUrl, withCredentials: true, headers: { "X-Augmis-CSRF": "1" } });
@@ -42,6 +57,7 @@ function rejectSession(): void {
 }
 
 api.interceptors.request.use(async (config) => {
+  assertPublicApiBase();
   if (!authPublicPath(config.url)) {
     let token = getAccessToken();
     if (tokenNeedsRenewal()) {

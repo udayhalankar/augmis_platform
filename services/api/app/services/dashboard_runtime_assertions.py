@@ -18,6 +18,8 @@ from pathlib import Path
 import jwt
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from services.api.app.core.config import settings
+from services.api.app.services.r05_secret_files import read_production_signing_key, SecretMaterialError
 
 ISSUER = "augmis.control-plane"
 TOKEN_KIND = "augmis.runtime.request.v1"
@@ -56,9 +58,11 @@ def _signing_key() -> Ed25519PrivateKey:
     if not path:
         raise AssertionIssuanceError()
     try:
-        material = Path(path).read_bytes()
+        material = (read_production_signing_key(Path(path))
+                    if str(settings.app_env).strip().lower() in ("production", "prod")
+                    else Path(path).read_bytes())
         key = serialization.load_pem_private_key(material, password=None)
-    except (OSError, ValueError, TypeError) as exc:
+    except (OSError, ValueError, TypeError, SecretMaterialError) as exc:
         raise AssertionIssuanceError() from exc
     if not isinstance(key, Ed25519PrivateKey):
         raise AssertionIssuanceError()

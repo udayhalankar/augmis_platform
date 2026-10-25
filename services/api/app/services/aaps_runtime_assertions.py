@@ -12,7 +12,7 @@ import uuid
 import jwt
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from services.api.app.services.aaps_deployment_contract import route_contract, DeploymentContractError
-from services.api.app.services.private_crud_runtime import signing_material, CrudRuntimeError
+from services.api.app.services.private_crud_runtime import signing_material, signing_private_key_bytes, CrudRuntimeError
 
 _UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
@@ -36,7 +36,7 @@ def make_aaps_request_assertion(*, context:dict, method:str, relative_path:str,
             len(raw_query)>2048):
         raise CrudRuntimeError('C1C_ROUTE_OR_METHOD_NOT_ALLOWED')
     private,_=signing_material()
-    signer=load_pem_private_key(private.read_bytes(),password=None)
+    signer=load_pem_private_key(signing_private_key_bytes(private),password=None)
     issued=int(time.time())
     claims={
         'iss':'augmis.control-plane',

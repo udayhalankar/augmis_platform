@@ -6,6 +6,7 @@ sessions; the in-memory option is deliberately development-only.
 from __future__ import annotations
 import json
 import os
+from urllib.parse import urlsplit, unquote
 from services.api.app.core.config import settings
 import time
 import uuid
@@ -14,22 +15,50 @@ from collections.abc import MutableMapping
 _ID_KEYS = frozenset({"user_id", "tenant_id", "application_id", "instance_id", "subscription_id", "version_id"})
 
 
+def _production_redis_url(url: str) -> None:
+    """Fail closed on insecure production Redis endpoints without exposing the URL."""
+    try:
+        parsed = urlsplit(url)
+        username = unquote(parsed.username or "")
+        password = parsed.password or ""
+        if (parsed.scheme != "rediss" or not parsed.hostname
+                or not username or username.lower() == "default" or not password
+                or any(ord(c) < 33 or ord(c) == 127 for c in url)
+                or parsed.query or parsed.fragment
+                or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
+            raise ValueError("invalid production Redis configuration")
+    except (ValueError, TypeError) as exc:
+        # The URL can contain credentials; never chain or print it.
+        raise RuntimeError("R03_PRODUCTION_REDIS_TLS_ACL_REQUIRED") from None
+
+
 def shared_session_map(purpose: str):
+    if purpose not in ("container", "static"):
+        raise ValueError("Unsupported runtime session purpose")
     mode = os.environ.get("AUGMIS_SESSION_STORE", "memory").strip().lower()
+    production = str(settings.app_env).strip().lower() in ("production", "prod")
     if mode == "memory":
-        if str(settings.app_env).lower() in ("production", "prod"):
+        if production:
             raise RuntimeError("Production runtime requires AUGMIS_SESSION_STORE=redis")
         return {}
     if mode != "redis":
         raise RuntimeError("Unsupported AUGMIS_SESSION_STORE")
     url = os.environ.get("AUGMIS_SESSION_REDIS_URL", "").strip()
-    if not url or not (url.startswith("redis://") or url.startswith("rediss://")):
+    if production:
+        _production_redis_url(url)
+    elif not url or not (url.startswith("redis://") or url.startswith("rediss://")):
         raise RuntimeError("AUGMIS_SESSION_REDIS_URL must be a Redis URL")
     import redis
-    client = redis.Redis.from_url(url, decode_responses=True, socket_connect_timeout=3, socket_timeout=3)
-    client.ping()  # No fallback to memory on failures.
+    try:
+        options = {"decode_responses": True, "socket_connect_timeout": 3, "socket_timeout": 3}
+        if production:
+            options.update(ssl_cert_reqs="required", ssl_check_hostname=True)
+        client = redis.Redis.from_url(url, **options)
+        client.ping()  # Never downgrade to process memory on failure.
+    except Exception:
+        # Redis errors and connection strings must not leak credential material.
+        raise RuntimeError("R03_REDIS_CONNECTION_UNAVAILABLE") from None
     return RedisSessionMap(client, purpose)
-
 
 _LUA_CONSUME = """
 local raw = redis.call('GET', KEYS[1])
@@ -84,7 +113,8 @@ class RedisSessionMap(MutableMapping):
         ttl = int(float(value.get("expires_at", 0)) - time.time())
         if ttl <= 0:
             raise ValueError("Refusing to persist expired runtime session")
-        self.client.set(self._key(key), self._encode(value), ex=ttl)
+        # Both existing gateway session contracts expire within eight hours.
+        self.client.set(self._key(key), self._encode(value), ex=min(ttl, 8 * 60 * 60))
 
     def __delitem__(self, key):
         if not self.client.delete(self._key(key)):

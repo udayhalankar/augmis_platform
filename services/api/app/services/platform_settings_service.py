@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 import uuid
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
+from services.api.app.services.r05_secret_files import read_production_secret_file
 from sqlalchemy.orm import Session
 
 from services.api.app.core.config import settings
@@ -23,22 +25,51 @@ class PlatformSettingsError(Exception):
 VALID_EMAIL_PROVIDERS = {"resend", "custom"}
 
 
-def _fernet() -> Fernet:
-    raw_key = str(
-        getattr(settings, "settings_encryption_key", "") or ""
-    ).strip()
+def _fernet() -> MultiFernet:
+    """Use active key for writes; permit explicitly retained prior keys for reads.
 
-    if not raw_key:
-        raise PlatformSettingsError(
-            "SETTINGS_ENCRYPTION_KEY is not configured."
-        )
-
+    Credentials are NEVER transparently re-encrypted in ordinary requests.
+    Rotating persisted DB ciphertext requires an audited, backed-up operation.
+    """
+    prod = str(settings.app_env).strip().lower() in ("production", "prod")
+    if prod:
+        # Production Settings loads only managed mounted key files.
+        raw_key = str(settings.settings_encryption_key or "").strip()
+        paths = os.environ.get("SETTINGS_ENCRYPTION_PREVIOUS_KEY_FILES", "").strip()
+        if paths and (paths.startswith(",") or paths.endswith(",") or ",," in paths):
+            raise PlatformSettingsError("R05_PREVIOUS_KEYS_INVALID")
+        previous = [] if not paths else [item.strip() for item in paths.split(",")]
+        if len(previous) > 3 or len(set(previous)) != len(previous):
+            raise PlatformSettingsError("R05_PREVIOUS_KEYS_INVALID")
+        try:
+            materials = [raw_key] + [
+                read_production_secret_file(path, purpose="settings")
+                for path in previous
+            ]
+        except Exception:
+            raise PlatformSettingsError("R05_PREVIOUS_KEYS_UNAVAILABLE") from None
+    else:
+        materials = [str(settings.settings_encryption_key or "").strip()]
+    if not materials[0]:
+        raise PlatformSettingsError("SETTINGS_ENCRYPTION_KEY is not configured.")
     try:
-        return Fernet(raw_key.encode("utf-8"))
-    except Exception as error:
-        raise PlatformSettingsError(
-            "SETTINGS_ENCRYPTION_KEY is invalid."
-        ) from error
+        if len(set(materials)) != len(materials):
+            raise ValueError("duplicate key")
+        return MultiFernet([Fernet(k.encode("utf-8")) for k in materials])
+    except Exception:
+        raise PlatformSettingsError("SETTINGS_ENCRYPTION_KEY is invalid.") from None
+
+
+def reencrypt_credential_ciphertext(ciphertext: str) -> str:
+    """Pure transformation for a separately authorized transactional rotation.
+
+    Caller must first verify DB backups and transaction rollback procedures;
+    this helper never performs any database write by itself.
+    """
+    try:
+        return _fernet().rotate(ciphertext.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        raise PlatformSettingsError("Stored email credential could not be decrypted.") from None
 
 
 def _encrypt_credential(value: str) -> str:

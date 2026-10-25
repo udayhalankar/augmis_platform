@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from sqlalchemy.orm import Session
 from services.api.app.core.config import settings
+from services.api.app.services.r05_secret_files import read_production_signing_key, SecretMaterialError
 from services.api.app.models.platform import ApplicationInstance
 from services.api.app.services.application_database_provisioning import (
     reserve_application_database, ApplicationDatabaseError,
@@ -52,6 +53,15 @@ def _expected_application() -> uuid.UUID:
     raise CrudRuntimeError('C1B4_APPLICATION_ALLOWLIST_REQUIRED')
 
 
+def signing_private_key_bytes(private: Path) -> bytes:
+    if str(settings.app_env).strip().lower() in ("production", "prod"):
+        try:
+            return read_production_signing_key(private)
+        except SecretMaterialError:
+            raise CrudRuntimeError("R05_SIGNING_KEY_FILE_UNSAFE") from None
+    return private.read_bytes()
+
+
 def signing_material() -> tuple[Path, Path]:
     files = [os.environ.get('AUGMIS_C1B_CRUD_SIGNING_PRIVATE_KEY_FILE', ''),
              os.environ.get('AUGMIS_C1B_CRUD_SIGNING_PUBLIC_KEY_FILE', '')]
@@ -61,7 +71,7 @@ def signing_material() -> tuple[Path, Path]:
     if any(not p.is_absolute() or not p.is_file() or p.is_symlink() for p in (private, public)):
         raise CrudRuntimeError('C1B4_SIGNING_PAIR_INVALID')
     try:
-        key = serialization.load_pem_private_key(private.read_bytes(), password=None)
+        key = serialization.load_pem_private_key(signing_private_key_bytes(private), password=None)
         pub = serialization.load_pem_public_key(public.read_bytes())
     except (OSError, TypeError, ValueError) as exc:
         raise CrudRuntimeError('C1B4_SIGNING_PAIR_INVALID') from exc

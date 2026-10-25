@@ -161,6 +161,10 @@ _RUNTIME_GATEWAY_SESSION_SECONDS = (
 _RUNTIME_GATEWAY_TICKET_SECONDS = 60
 
 from services.api.app.services.shared_runtime_sessions import RedisSessionMap, shared_session_map
+from services.api.app.core.config import settings
+from services.api.app.services.r04_abuse_controls import (
+    is_production, bounded_gateway_body, bounded_upstream_read,
+)
 
 _RUNTIME_GATEWAY_SESSIONS = shared_session_map("container")
 
@@ -198,6 +202,11 @@ def _gateway_cookie_name(
 
 
 def _runtime_gateway_cleanup() -> None:
+
+    # Redis EXPIRE removes sessions across all workers. Do not SCAN Redis on
+    # each gateway request; retain the development-memory cleanup path.
+    if isinstance(_RUNTIME_GATEWAY_SESSIONS, RedisSessionMap):
+        return
 
     now = time.time()
 
@@ -1031,7 +1040,14 @@ async def _proxy_runtime_gateway_request(
         ].id
     )
 
-    body = await request.body()
+    # Production hosted-app traffic is bounded even for chunked transfers.
+    # Keep the previously accepted development gateway behavior unchanged.
+    if is_production(settings.app_env):
+        body = await bounded_gateway_body(
+            request, settings.runtime_gateway_request_max_mb * 1024 * 1024
+        )
+    else:
+        body = await request.body()
     # C1-B4: only signed gateway context may access the reference-app API.
     # There is no trusted browser-supplied tenant, identity or assertion.
     if (context["version"].manifest.get("metadata") or {}).get("id") == "augmis-crud-reference":
@@ -1118,7 +1134,9 @@ async def _proxy_runtime_gateway_request(
             parsed_runtime.hostname
         ),
         port=port,
-        timeout=30,
+        timeout=(settings.runtime_gateway_socket_timeout_seconds
+                 if is_production(settings.app_env)
+                 else 30),
     )
 
     try:
@@ -1145,7 +1163,9 @@ async def _proxy_runtime_gateway_request(
         )
 
         payload = (
-            upstream.read()
+            bounded_upstream_read(
+                upstream, settings.runtime_gateway_response_max_mb * 1024 * 1024
+            ) if is_production(settings.app_env) else upstream.read()
         )
 
         status_code = (

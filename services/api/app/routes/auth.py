@@ -37,6 +37,8 @@ from services.api.app.services.auth_service import (
 
 from services.api.app.routes.session_security import assert_origin, set_cookie, reply_session
 from services.api.app.services.session_security import create_session
+from services.api.app.services.r04_abuse_controls import enforce_login_account_rate
+from services.api.app.core.config import settings
 
 from services.api.app.services.audit_service import (
     record_audit_event,
@@ -128,6 +130,11 @@ def login(
 
     normalized = normalize_email(
         str(payload.email)
+    )
+
+    # R04: production-only Redis-backed account throttle. No client IP trust.
+    enforce_login_account_rate(
+        normalized, environment=settings.app_env, secret=settings.jwt_secret
     )
 
     user = db.scalar(

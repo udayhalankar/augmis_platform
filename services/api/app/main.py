@@ -1,6 +1,7 @@
 # services/api/app/main.py
 
 from fastapi import FastAPI
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from fastapi.middleware.cors import (
     CORSMiddleware,
@@ -8,6 +9,7 @@ from fastapi.middleware.cors import (
 
 from services.api.app.core.config import (
     settings,
+    validate_production_ingress_config,
 )
 
 from services.api.app.routes import (
@@ -35,6 +37,15 @@ from services.api.app.routes import (
 from services.api.app.services.security_release_gate import require_safe_runtime_exposure
 
 require_safe_runtime_exposure()
+
+# Invoked once the independent production-release gate is legitimately opened.
+# Its validation can also be exercised independently while the gate is closed.
+if settings.app_env.strip().lower() in ("production", "prod"):
+    validate_production_ingress_config(settings)
+    if not (1 <= settings.runtime_gateway_request_max_mb <= 250
+            and 1 <= settings.runtime_gateway_response_max_mb <= 250
+            and 3 <= settings.runtime_gateway_socket_timeout_seconds <= 60):
+        raise RuntimeError("R04_GATEWAY_RESOURCE_CONFIG_INVALID")
 
 app = FastAPI(
     title=settings.app_name,
@@ -71,6 +82,30 @@ app.add_middleware(
     ],
 )
 
+
+# Production API accepts only the explicitly approved public/private Hosts.
+# Do not grant authority to X-Forwarded-*; trusted proxy peers must be
+# configured at the ALB/network and Uvicorn launch boundaries separately.
+if settings.app_env.strip().lower() in ("production", "prod"):
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=settings.api_trusted_host_list,
+        www_redirect=False,
+    )
+
+# R04: API control-plane hardening. Do not apply a universal CSP to
+# untrusted static applications or publisher-hosted gateway responses.
+# Their existing per-route policies remain authoritative.
+@app.middleware("http")
+async def _r04_control_plane_headers(request, call_next):
+    response = await call_next(request)
+    if settings.app_env.strip().lower() not in ("prod", "production"):
+        return response  # No change to existing development response behavior.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if not request.url.path.startswith(("/api/v1/runtime-gateway/", "/api/v1/static-runtime/")):
+        response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 # ============================================================
 # AUTHENTICATION

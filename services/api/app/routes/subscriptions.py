@@ -293,6 +293,11 @@ def _static_runtime_cookie_name(
 
 def _cleanup_static_runtime_sessions() -> None:
 
+    # Shared Redis session expiration is enforced by key TTL; scanning the
+    # namespace on every request is unnecessary. Revocation scans remain.
+    if isinstance(_STATIC_RUNTIME_SESSIONS, RedisSessionMap):
+        return
+
     now = time.time()
 
     with _STATIC_RUNTIME_LOCK:
@@ -1434,25 +1439,37 @@ def static_runtime(
                     )
                 )
 
-                session[
-                    "ticket_used"
-                ] = True
-
-                session[
-                    "ticket_hash"
-                ] = None
-
-                session[
-                    "ticket_expires_at"
-                ] = 0
-
-                session[
-                    "session_hash"
-                ] = (
-                    _static_runtime_hash(
-                        session_secret
+                if isinstance(_STATIC_RUNTIME_SESSIONS, RedisSessionMap):
+                    # Atomic compare-and-consume across FastAPI workers.
+                    # A retrieved Redis session is a detached dictionary;
+                    # mutating it would leave the ticket reusable.
+                    valid_ticket = _STATIC_RUNTIME_SESSIONS.consume_ticket(
+                        runtime_id,
+                        expected_hash=_static_runtime_hash(ticket),
+                        now=now,
+                        new_session_hash=_static_runtime_hash(session_secret),
                     )
-                )
+                else:
+                    # Preserve the existing development-memory transaction.
+                    session[
+                        "ticket_used"
+                    ] = True
+
+                    session[
+                        "ticket_hash"
+                    ] = None
+
+                    session[
+                        "ticket_expires_at"
+                    ] = 0
+
+                    session[
+                        "session_hash"
+                    ] = (
+                        _static_runtime_hash(
+                            session_secret
+                        )
+                    )
 
         if not valid_ticket:
 

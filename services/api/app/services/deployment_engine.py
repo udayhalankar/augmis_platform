@@ -341,6 +341,14 @@ def start_container(
     crud_runtime: CrudRuntimeLaunch | None = None,
 ) -> dict:
 
+    # R02: reject every existing container-launch mode before any Docker call.
+    # These modes use development loopback relays or published host ports;
+    # a production private-ingress adapter is NOT yet approved.
+    from services.api.app.core.config import settings
+    current_env = str(settings.app_env).strip().lower()
+    if current_env not in ('development', 'dev'):
+        raise DeploymentError('R02_PRODUCTION_DEPLOYMENT_MODE_NOT_APPROVED')
+
     if crud_runtime is not None:
         if pilot_runtime is not None:
             raise DeploymentError("Conflicting private runtime modes")
