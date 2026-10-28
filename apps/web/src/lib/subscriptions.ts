@@ -88,3 +88,58 @@ export async function cancelTenantSubscription(
   );
   return response.data;
 }
+
+// The authenticated Marketplace API exposes active offers whose application
+// has a published release. Filter by exact application ID for change-offer UX;
+// the backend remains authoritative for tenant scope and commercial rules.
+export type SubscriptionChangeOfferOption = {
+  id: string;
+  offerKey: string;
+  name: string;
+  status: string;
+  versionPolicy: string;
+  autoUpgrade: boolean;
+  application: { id: string; appKey: string; name: string };
+  entitlements: Array<{
+    code: string;
+    value: Record<string, unknown> | null;
+  }>;
+};
+
+export type SubscriptionChangeOfferResult = {
+  status: string;
+  subscriptionId: string;
+  tenantId: string;
+  applicationId: string;
+  previousOfferId: string;
+  offer: { id: string; offerKey: string; name: string };
+  versionPolicy: string;
+  baselineVersionId: string;
+  pinnedVersionId: string | null;
+  autoUpgrade: boolean;
+};
+
+export async function loadSubscriptionChangeOffers(
+  applicationId: string
+): Promise<SubscriptionChangeOfferOption[]> {
+  const response = await api.get<SubscriptionChangeOfferOption[]>(
+    "/api/v1/marketplace/offers"
+  );
+  return response.data.filter(
+    (offer) =>
+      offer.application.id === applicationId &&
+      offer.status === "active" &&
+      offer.entitlements.some((item) => item.code === "application.deploy")
+  );
+}
+
+export async function changeTenantSubscriptionOffer(
+  subscriptionId: string,
+  offerId: string
+): Promise<SubscriptionChangeOfferResult> {
+  const response = await api.post<SubscriptionChangeOfferResult>(
+    `/api/v1/subscriptions/${subscriptionId}/change-offer`,
+    { offer_id: offerId }
+  );
+  return response.data;
+}

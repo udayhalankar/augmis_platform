@@ -4,6 +4,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
 
@@ -24,6 +25,7 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
+  MenuItem,
   TextField,
   Typography,
 } from "@mui/material";
@@ -40,6 +42,9 @@ import PlayCircleOutlineOutlined
 import CancelOutlined
   from "@mui/icons-material/CancelOutlined";
 
+import SwapHorizOutlined
+  from "@mui/icons-material/SwapHorizOutlined";
+
 import AppShell
   from "@/components/app-shell";
 
@@ -48,10 +53,13 @@ import ProtectedRoute
 
 import {
   cancelTenantSubscription,
+  changeTenantSubscriptionOffer,
+  loadSubscriptionChangeOffers,
   loadTenantSubscriptions,
   resumeTenantSubscription,
   suspendTenantSubscription,
   TenantSubscriptionSummary,
+  SubscriptionChangeOfferOption,
 } from "@/lib/subscriptions";
 
 
@@ -184,6 +192,21 @@ export default function SubscriptionsPage() {
     suspendReason,
     setSuspendReason,
   ] = useState("");
+
+  const [
+    changeOfferTarget,
+    setChangeOfferTarget,
+  ] = useState<TenantSubscriptionSummary | null>(null);
+
+  // Changing tenants dismisses the operation; the authoritative backend
+  // independently validates the subscription's tenant permission.
+  const [changeOfferTenantId, setChangeOfferTenantId] = useState("");
+  const [changeOfferOptions, setChangeOfferOptions] =
+    useState<SubscriptionChangeOfferOption[]>([]);
+  const [changeOfferSelection, setChangeOfferSelection] = useState("");
+  const [changeOfferLoading, setChangeOfferLoading] = useState(false);
+  const [changeOfferError, setChangeOfferError] = useState("");
+  const changeOfferRequestId = useRef(0);
 
 
   
@@ -339,6 +362,86 @@ useEffect(
   ]
 );
 
+
+  useEffect(() => {
+    changeOfferRequestId.current += 1;
+    setChangeOfferTarget(null);
+    setChangeOfferTenantId("");
+    setChangeOfferOptions([]);
+    setChangeOfferSelection("");
+    setChangeOfferError("");
+    setChangeOfferLoading(false);
+  }, [selectedTenantId]);
+
+  const openChangeOffer = async (subscription: TenantSubscriptionSummary) => {
+    if (!selectedTenantId || busyId) return;
+    const requestId = ++changeOfferRequestId.current;
+
+    setChangeOfferTarget(subscription);
+    setChangeOfferTenantId(selectedTenantId);
+    setChangeOfferOptions([]);
+    setChangeOfferSelection("");
+    setChangeOfferError("");
+    setChangeOfferLoading(true);
+    setError("");
+    setMessage("");
+
+    try {
+      const options = await loadSubscriptionChangeOffers(subscription.application.id);
+      if (requestId === changeOfferRequestId.current) {
+        setChangeOfferOptions(options.filter((offer) => offer.id !== subscription.offer.id));
+      }
+    } catch (loadError) {
+      if (requestId === changeOfferRequestId.current) {
+        setChangeOfferError(apiError(loadError, "Available offers could not be loaded."));
+      }
+    } finally {
+      if (requestId === changeOfferRequestId.current) setChangeOfferLoading(false);
+    }
+  };
+
+  const submitChangeOffer = async () => {
+    const subscription = changeOfferTarget;
+    const option = changeOfferOptions.find((offer) => offer.id === changeOfferSelection);
+    if (
+      !subscription || !option || busyId || changeOfferLoading ||
+      !selectedTenantId || selectedTenantId !== changeOfferTenantId ||
+      option.application.id !== subscription.application.id ||
+      option.id === subscription.offer.id
+    ) return;
+
+    setBusyId(subscription.id);
+    setChangeOfferError("");
+    setMessage("");
+    setError("");
+
+    try {
+      const result = await changeTenantSubscriptionOffer(subscription.id, option.id);
+      if (
+        result.status !== "CHANGED" ||
+        result.subscriptionId !== subscription.id ||
+        result.applicationId !== subscription.application.id ||
+        result.tenantId !== selectedTenantId ||
+        result.offer.id !== option.id
+      ) {
+        throw new Error("Subscription change returned an unexpected response. Refresh and verify before continuing.");
+      }
+      changeOfferRequestId.current += 1;
+      setChangeOfferTarget(null);
+      setChangeOfferSelection("");
+      setChangeOfferOptions([]);
+      setMessage(`${subscription.application.name}: changed to ${result.offer.name} (${result.versionPolicy}).`);
+      await loadSubscriptions(selectedTenantId);
+    } catch (actionError) {
+      setChangeOfferError(apiError(actionError, "Offer change failed. No further action was taken by the page."));
+    } finally {
+      setBusyId("");
+    }
+  };
+
+  const selectedChangeOffer = changeOfferOptions.find(
+    (offer) => offer.id === changeOfferSelection
+  );
 
   const runAction =
     async (
@@ -835,6 +938,9 @@ useEffect(
                         busyId ===
                         subscription.id
                       }
+                      onChangeOffer={
+                        () => openChangeOffer(subscription)
+                      }
                       onSuspend={
                         () => {
                           setSuspendTarget(
@@ -956,6 +1062,113 @@ useEffect(
           </DialogActions>
         </Dialog>
 
+        <Dialog
+          open={Boolean(changeOfferTarget)}
+          onClose={() => {
+            if (!busyId) {
+              changeOfferRequestId.current += 1;
+              setChangeOfferTarget(null);
+            }
+          }}
+          fullWidth
+          maxWidth="sm"
+        >
+          <DialogTitle>Change Subscription Offer</DialogTitle>
+          <DialogContent>
+            <Typography sx={{ fontSize: 13, fontWeight: 600, mb: 0.5 }}>
+              {changeOfferTarget?.application.name}
+            </Typography>
+            <Typography sx={{ fontSize: 11, color: "text.secondary", mb: 2 }}>
+              Subscription: {changeOfferTarget?.id}
+            </Typography>
+
+            <Box sx={{ bgcolor: "#f4f6f8", p: 1.5, border: "1px solid", borderColor: "divider", mb: 2 }}>
+              <Typography sx={{ fontSize: 11, fontWeight: 600 }}>
+                Current: {changeOfferTarget?.offer.name}
+              </Typography>
+              <Typography sx={{ fontSize: 11, color: "text.secondary" }}>
+                Policy: {changeOfferTarget?.versionPolicy} · Auto-upgrade: {changeOfferTarget?.autoUpgrade ? "On" : "Off"}
+              </Typography>
+            </Box>
+
+            {changeOfferLoading ? (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1, py: 1 }}>
+                <CircularProgress size={18} />
+                <Typography sx={{ fontSize: 12 }}>Loading active offers for this application…</Typography>
+              </Box>
+            ) : (
+              <TextField
+                select
+                fullWidth
+                size="small"
+                label="Target offer"
+                value={changeOfferSelection}
+                onChange={(event) => {
+                  setChangeOfferSelection(event.target.value);
+                  setChangeOfferError("");
+                }}
+                disabled={Boolean(busyId) || changeOfferOptions.length === 0}
+                helperText="Only active offers for this exact application with a deployment entitlement are selectable."
+              >
+                {changeOfferOptions.map((offer) => (
+                  <MenuItem key={offer.id} value={offer.id}>
+                    {offer.name} — {offer.offerKey} ({offer.versionPolicy})
+                  </MenuItem>
+                ))}
+              </TextField>
+            )}
+
+            {!changeOfferLoading && !changeOfferError && changeOfferOptions.length === 0 && (
+              <Alert severity="info" sx={{ mt: 2 }}>
+                No other eligible active offer is available for this application.
+              </Alert>
+            )}
+
+            {selectedChangeOffer && (
+              <Box sx={{ mt: 2, p: 1.5, bgcolor: "#f4f6f8", border: "1px solid", borderColor: "divider" }}>
+                <Typography sx={{ fontWeight: 600, fontSize: 12, mb: 0.75 }}>
+                  Proposed commercial terms
+                </Typography>
+                <Typography sx={{ fontSize: 12 }}>Version policy: {selectedChangeOffer.versionPolicy}</Typography>
+                <Typography sx={{ fontSize: 12 }}>Auto-upgrade: {selectedChangeOffer.autoUpgrade ? "On" : "Off"}</Typography>
+                <Typography sx={{ fontSize: 12, mt: 0.75 }}>
+                  Entitlements: {selectedChangeOffer.entitlements.map((entry) =>
+                    `${entry.code}${typeof entry.value?.maxInstances === "number" ? ` (max ${entry.value?.maxInstances})` : ""}`
+                  ).join(", ")}
+                </Typography>
+              </Box>
+            )}
+
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              Confirming changes this existing subscription's commercial policy and
+              entitlement snapshot. The backend checks running-instance compatibility.
+              It does not upgrade, restart, or create an application instance.
+            </Alert>
+            {changeOfferError && <Alert severity="error" sx={{ mt: 2 }}>{changeOfferError}</Alert>}
+          </DialogContent>
+          <DialogActions>
+            <Button
+              disabled={Boolean(busyId)}
+              onClick={() => {
+                changeOfferRequestId.current += 1;
+                setChangeOfferTarget(null);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              disabled={
+                Boolean(busyId) || changeOfferLoading || !selectedChangeOffer ||
+                !selectedTenantId || selectedTenantId !== changeOfferTenantId
+              }
+              onClick={submitChangeOffer}
+            >
+              {busyId ? "Changing…" : "Confirm Change Offer"}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
       </AppShell>
     </ProtectedRoute>
   );
@@ -965,6 +1178,7 @@ useEffect(
 function SubscriptionRow({
   subscription,
   busy,
+  onChangeOffer,
   onSuspend,
   onResume,
   onCancel,
@@ -973,6 +1187,8 @@ function SubscriptionRow({
     TenantSubscriptionSummary;
   busy:
     boolean;
+  onChangeOffer:
+    () => void;
   onSuspend:
     () => void;
   onResume:
@@ -1103,6 +1319,18 @@ function SubscriptionRow({
               "wrap",
           }}
         >
+          {status === "active" && (
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<SwapHorizOutlined />}
+              disabled={busy}
+              onClick={onChangeOffer}
+            >
+              Change Offer
+            </Button>
+          )}
+
           {status === "active" && (
             <Button
               size="small"

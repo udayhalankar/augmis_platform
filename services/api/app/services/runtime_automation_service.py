@@ -170,6 +170,9 @@ def plan_upgrades(db: Session, *, dry_run: bool = True, limit: int = 100):
 
 def claim_one(db: Session, worker_id: str):
     """Non-overlapping durable claim; expired executions quarantine for review."""
+    import re
+    if not isinstance(worker_id, str) or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,100}', worker_id):
+        raise ValueError('R06_WORKER_ID_INVALID')
     now = utcnow()
     expired = list(db.scalars(select(RuntimeUpgradeJob).where(
         RuntimeUpgradeJob.status == "running",
@@ -178,6 +181,11 @@ def claim_one(db: Session, worker_id: str):
     for job in expired:
         job.status = "needs_reconciliation"  # NEVER automatically retry unknown Docker outcome.
         job.last_error_code = "LEASE_EXPIRED_REVIEW_REQUIRED"
+        record_audit_event(db, action="application.auto_upgrade.reconciliation_required",
+            resource_type="runtime_upgrade_job", resource_id=job.id,
+            tenant_id=job.tenant_id, outcome="failed",
+            message="Expired auto-upgrade lease requires operator review.",
+            metadata={"systemActor":"runtime_worker","code":"LEASE_EXPIRED_REVIEW_REQUIRED"})
     job = db.scalar(select(RuntimeUpgradeJob).where(
         RuntimeUpgradeJob.status == "queued",
     ).order_by(RuntimeUpgradeJob.created_at.asc()).with_for_update(skip_locked=True).limit(1))
@@ -185,20 +193,29 @@ def claim_one(db: Session, worker_id: str):
         db.commit()
         return None
     job.status = "running"
-    job.claimed_by = worker_id[:100]
+    job.claimed_by = worker_id
     job.lease_until = now + LEASE
     job.attempts += 1
     db.commit()
     return job.id
 
 
-def execute_one(db: Session, job_id: uuid.UUID):
+def execute_one(db: Session, job_id: uuid.UUID, *, expected_worker_id: str | None = None):
     """Revalidate consent and policy before shared internal lifecycle executor."""
     from services.api.app.services.runtime_upgrade_executor import perform_instance_upgrade
     from fastapi import HTTPException
     job = db.get(RuntimeUpgradeJob, job_id)
     if not job or job.status != "running":
         return "SKIPPED"
+    if expected_worker_id is not None:
+        # Reject stale or foreign claims before any Docker side effect.
+        if job.claimed_by != expected_worker_id or job.lease_until is None:
+            return "SKIPPED"
+        lease = job.lease_until
+        if lease.tzinfo is None:
+            lease = lease.replace(tzinfo=timezone.utc)
+        if lease <= utcnow():
+            return "SKIPPED"
     instance = db.get(ApplicationInstance, job.instance_id)
     valid = (
         instance is not None and instance.tenant_id == job.tenant_id
@@ -249,6 +266,10 @@ def execute_one(db: Session, job_id: uuid.UUID):
         return "FAILED" if known_failure else "NEEDS_RECONCILIATION"
     db.rollback()  # discard stale in-memory job after executor commits
     job = db.get(RuntimeUpgradeJob, job_id)
+    # The shared executor may commit; do not stamp success if ownership changed.
+    if job is None or (expected_worker_id is not None and
+                       (job.status != "running" or job.claimed_by != expected_worker_id)):
+        return "NEEDS_RECONCILIATION"
     job.status = "succeeded"
     job.completed_at = utcnow()
     job.lease_until = None

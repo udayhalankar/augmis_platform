@@ -7,7 +7,7 @@ is intentionally manual until C1-D3 reconciliation is delivered.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from services.api.app.models.deployment_reliability import ApplicationBuildQualification
 from services.api.app.models.platform import ApplicationBuild, ApplicationVersion
@@ -23,6 +23,7 @@ from services.api.app.services.c1d2_disposable_qualification import (
 )
 from services.api.app.core.runtime_host import read_profile
 from services.api.app.services.runtime_host_readiness import check_runtime_host
+from services.api.app.services.audit_service import record_audit_event
 
 REVISION = 'c1d2-disposable-2'
 SMOKE_KEYS = ('image_identity', 'database_isolation', 'schema_rls',
@@ -142,3 +143,37 @@ def worker_one(db, *, runner_class=DisposableQualification) -> str:
         db.rollback()
         raise QualificationGateError('C1D2_RESULT_PERSISTENCE_FAILED')
     return 'PASS' if code is None else 'FAIL'
+
+
+def quarantine_interrupted_smokes(db, *, older_than_seconds: int = 14400,
+                                  limit: int = 25, at: datetime | None = None) -> int:
+    """Explicit, audited metadata quarantine for an abandoned durable claim.
+
+    Never retries Docker work, resets started_at, or issues a PASS. Must be
+    executed only by the trusted operator worker with explicit approval.
+    """
+    if type(older_than_seconds) is not int or not 3600 <= older_than_seconds <= 604800:
+        raise QualificationGateError('R06_STALE_WINDOW_INVALID')
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise QualificationGateError('R06_STALE_LIMIT_INVALID')
+    now = at or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise QualificationGateError('R06_UTC_REQUIRED')
+    cutoff = now - timedelta(seconds=older_than_seconds)
+    rows = list(db.scalars(select(ApplicationBuildQualification).where(
+        ApplicationBuildQualification.status == 'pending_smoke',
+        ApplicationBuildQualification.started_at.is_not(None),
+        ApplicationBuildQualification.started_at <= cutoff,
+    ).order_by(ApplicationBuildQualification.started_at.asc())
+      .with_for_update(skip_locked=True).limit(limit)))
+    for row in rows:
+        row.status = 'needs_review'
+        row.failure_code = 'R06_INTERRUPTED_QUALIFICATION_REVIEW_REQUIRED'
+        row.checks_json = None
+        # Preserve claim time and do not set finished_at, evidence or qualifier_revision.
+        record_audit_event(db, action='application.qualification.interrupted',
+            resource_type='application_build_qualification', resource_id=row.build_id,
+            outcome='failed', message='Interrupted qualification requires manual review.',
+            metadata={'code':'R06_INTERRUPTED_QUALIFICATION_REVIEW_REQUIRED'})
+    db.commit()  # Atomic qualification status and audit trail.
+    return len(rows)

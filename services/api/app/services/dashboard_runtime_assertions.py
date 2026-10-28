@@ -11,6 +11,7 @@ multi-tenant general-purpose assertion issuer or a substitute for B3 gates.
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -30,6 +31,8 @@ TTL_SECONDS = 20  # Pass 3F verifier rejects tokens older than 30 seconds.
 _TENANT_ENV = "AUGMIS_DASHBOARD_ASSERTION_TENANT_ID"
 _APPLICATION_ENV = "AUGMIS_DASHBOARD_ASSERTION_APPLICATION_ID"
 _PRIVATE_KEY_ENV = "AUGMIS_DASHBOARD_ASSERTION_PRIVATE_KEY_FILE"
+_SIGNING_KEY_ID_ENV = "AUGMIS_DASHBOARD_ASSERTION_SIGNING_KEY_ID"
+_KEY_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 class AssertionIssuanceError(Exception):
@@ -116,7 +119,15 @@ def make_dashboard_request_assertion(
         "instanceId": str(instance_id),
         "scope": ["dashboard.read"],
     }
-    return jwt.encode(claims, key, algorithm="EdDSA", headers={"typ": "JWT"})
+    # R05: Optional, operator-pinned signing key identity.  A legacy issuer
+    # without this setting continues to issue the same kid-less assertions.
+    key_id = os.environ.get(_SIGNING_KEY_ID_ENV, "").strip()
+    if key_id and not _KEY_ID_PATTERN.fullmatch(key_id):
+        raise AssertionIssuanceError()
+    header = {"typ": "JWT"}
+    if key_id:
+        header["kid"] = key_id
+    return jwt.encode(claims, key, algorithm="EdDSA", headers=header)
 
 
 def should_forward_request_header(name: str, hop_headers: set[str]) -> bool:

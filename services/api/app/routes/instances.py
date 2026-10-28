@@ -1356,8 +1356,8 @@ def get_release_options(
     try:
         sub = require_active_subscription(db=db, tenant_id=instance.tenant_id,
                                           application_id=instance.application_id)
-        if sub.version_policy != 'same_major' or sub.pinned_version_id is not None:
-            reason = 'Only unpinned same_major subscriptions support coordinated release upgrades'
+        if sub.version_policy not in ('same_major', 'any') or sub.pinned_version_id is not None:
+            reason = 'Only unpinned same_major or any subscriptions support coordinated release upgrades'
         else:
             candidate = get_latest_published_ready_version(db, instance.application_id)
             require_subscription_version_allowed(db=db, subscription=sub, target_version=candidate)

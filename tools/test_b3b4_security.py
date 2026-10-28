@@ -68,4 +68,27 @@ def test_production_launch_fail_closed():
     script='from services.api.app.services.security_release_gate import require_safe_runtime_exposure; require_safe_runtime_exposure()'
     r=subprocess.run([sys.executable,'-c',script],env=env,capture_output=True,text=True)
     assert r.returncode!=0
-    assert 'Production launch blocked' in r.stderr
+    # R05 rejects inline production JWT material before the older B3 exposure
+    # gate can execute. This is the intended fail-closed ordering, not a launch.
+    assert 'RuntimeError: R05_PRODUCTION_INLINE_SECRET_DENIED' in r.stderr
+    assert 'sufficiently-long-test-not-real-secret' not in r.stderr
+
+
+def test_production_gate_requires_shared_redis_after_config_validation(monkeypatch):
+    # Exercise B3 independently, after simulating successful configuration
+    # validation, so the earlier R05 secret-file guard cannot mask this gate.
+    from types import SimpleNamespace
+    from services.api.app.services import security_release_gate as gate
+    monkeypatch.setattr(gate, 'settings', SimpleNamespace(app_env='production'))
+    monkeypatch.delenv('AUGMIS_SESSION_STORE', raising=False)
+    with pytest.raises(RuntimeError, match='^Production requires shared Redis runtime sessions$'):
+        gate.require_safe_runtime_exposure()
+
+
+def test_production_gate_rejects_unsafe_runtime_exposure(monkeypatch):
+    from types import SimpleNamespace
+    from services.api.app.services import security_release_gate as gate
+    monkeypatch.setattr(gate, 'settings', SimpleNamespace(app_env='production'))
+    monkeypatch.setenv('AUGMIS_SESSION_STORE', 'redis')
+    with pytest.raises(RuntimeError, match='^Production launch blocked:'):
+        gate.require_safe_runtime_exposure()

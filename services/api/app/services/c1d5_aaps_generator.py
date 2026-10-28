@@ -165,7 +165,7 @@ def _dockerfile(module: str, req: str, output_dir: str, has_lock: bool):
             "ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 HOME=/tmp\n"
             "WORKDIR /opt/app\n"
             f"COPY {req} ./requirements.txt\n"
-            "RUN pip install --no-cache-dir --timeout 180 --retries 10 -r requirements.txt PyJWT==2.13.0 cryptography==46.0.4 \\\n"
+            "RUN pip install --no-cache-dir --timeout 180 --retries 10 -r requirements.txt PyJWT==2.13.0 cryptography==50.0.2 \\\n"
             "    && groupadd --gid 10001 augmisapp \\\n"
             "    && useradd --uid 10001 --gid 10001 --no-create-home augmisapp\n"
             f"COPY {backend_folder}/ ./{backend_folder}/\n"

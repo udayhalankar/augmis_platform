@@ -167,7 +167,7 @@ def perform_instance_upgrade(*, db: Session, instance_id: uuid.UUID,
         from services.api.app.services.c1d2_automatic_qualification import (
             require_passing_build, QualificationGateError,
         )
-        if subscription.version_policy != 'same_major' or subscription.pinned_version_id is not None:
+        if subscription.version_policy not in ('same_major', 'any') or subscription.pinned_version_id is not None:
             raise HTTPException(status_code=409, detail='C1D3_RELEASE_POLICY_NOT_SUPPORTED')
         if target_version.publication_status != 'published':
             raise HTTPException(status_code=409, detail='C1D3_TARGET_NOT_PUBLISHED')

@@ -113,7 +113,7 @@ def create_handler(target):
             body=self.rfile.read(n) if n else b''
             headers={'Accept-Encoding':'identity'}
             if tokens: headers['X-Augmis-Runtime-Assertion']=tokens[0]
-            if self.command in {'POST','PUT'}:
+            if self.command in {'POST','PUT','PATCH'}:
                 if not self.headers.get('Content-Type','').startswith('application/json'):
                     return self.reply(415,b'JSON required')
                 headers['Content-Type']='application/json'
@@ -134,7 +134,6 @@ def create_handler(target):
         do_GET=do_POST=do_PUT=do_PATCH=do_DELETE=serve
         def do_HEAD(self): self.reply(405,b'Method not allowed')
         def do_OPTIONS(self): self.reply(405,b'Method not allowed')
-        def do_PATCH(self): self.reply(405,b'Method not allowed')
     return Handler
 
 
