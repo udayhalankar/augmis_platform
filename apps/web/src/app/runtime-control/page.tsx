@@ -38,6 +38,11 @@ function errorMessage(err: unknown): string {
 }
 
 export default function RuntimeControlPage() {
+  const { selectedTenantId, loading } = useTenant();
+  return <RuntimeControlContent key={`${loading}:${selectedTenantId}`} />;
+}
+
+function RuntimeControlContent() {
   const { selectedTenant, selectedTenantId, loading: tenantLoading } = useTenant();
   const { hasTenantPermission } = usePermissions();
   const canManageReleases = hasTenantPermission("application.deploy") && hasTenantPermission("subscription.manage");
@@ -112,12 +117,23 @@ export default function RuntimeControlPage() {
   }, []);
 
   useEffect(() => {
-    setInstances([]); setJobs([]); setQuota(null); setConfig(null); setCurrentId("");
-    if (!tenantLoading && selectedTenantId) void reload(selectedTenantId);
-  }, [selectedTenantId, tenantLoading, reload]);
+    if (tenantLoading || !selectedTenantId) return;
+    let active = true;
+    void Promise.all([
+      listRuntimeInstances(selectedTenantId),
+      listRuntimeJobs(selectedTenantId),
+      getRuntimeQuota(selectedTenantId),
+    ]).then(([items, upgrades, q]) => {
+      if (!active) return;
+      setInstances(items); setJobs(upgrades); setQuota(q);
+      setCurrentId(items[0]?.id ?? "");
+    }).catch((err: unknown) => {
+      if (active) setError(errorMessage(err));
+    });
+    return () => { active = false; };
+  }, [selectedTenantId, tenantLoading]);
 
   useEffect(() => {
-    setConfig(null);
     if (!currentId) return;
     let cancelled = false;
     void getRuntimeConfig(currentId).then((data) => {
@@ -234,7 +250,7 @@ export default function RuntimeControlPage() {
         <Box sx={{px:2.5,py:2,borderBottom:"1px solid",borderColor:"divider"}}>
           <Typography variant="h6">Runtime application management</Typography>
           <Typography variant="caption" color="text.secondary">
-             Stop disables this application's launch for the entire tenant and stops its running containers.
+             Stop disables this application&apos;s launch for the entire tenant and stops its running containers.
              Start an explicitly stopped instance to restore access after health checks. Both actions are permission-checked.
           </Typography>
         </Box>

@@ -33,13 +33,13 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : "Publisher member request failed.";
 }
 
-export default function PublisherUsersDialog({
+function PublisherUsersDialogState({
   open, publisherId, publisherName, onClose,
 }: Props) {
   const { user } = useAuth();
   const [members, setMembers] = useState<PublisherMember[]>([]);
   const [roles, setRoles] = useState<PublisherRole[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(open && Boolean(publisherId));
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -66,14 +66,23 @@ export default function PublisherUsersDialog({
   }, [publisherId]);
 
   useEffect(() => {
-    if (open) {
-      setEditingId("");
-      setSuccess("");
-      setEmail("");
-      setAddRoles(["publisher_developer"]);
-      void refresh();
-    }
-  }, [open, refresh]);
+    if (!open || !publisherId) return;
+    let active = true;
+    // Async completion is the external synchronization point, not a render-time state reset.
+    void Promise.all([
+      loadPublisherMembers(publisherId),
+      loadPublisherRoles(publisherId),
+    ]).then(([memberRows, roleRows]) => {
+      if (!active) return;
+      setMembers(memberRows);
+      setRoles(roleRows);
+    }).catch((e: unknown) => {
+      if (active) setError(errorText(e));
+    }).finally(() => {
+      if (active) setLoading(false);
+    });
+    return () => { active = false; };
+  }, [open, publisherId]);
 
   const actorMembership = useMemo(
     () => members.find((member) =>
@@ -243,5 +252,15 @@ export default function PublisherUsersDialog({
         <Button onClick={onClose} disabled={Boolean(busyId)}>Close</Button>
       </DialogActions>
     </Dialog>
+  );
+}
+
+// Reset the edit/invite form whenever this dialog is reopened or changes publisher.
+export default function PublisherUsersDialog(props: Props) {
+  return (
+    <PublisherUsersDialogState
+      key={`${props.publisherId}:${props.open ? "open" : "closed"}`}
+      {...props}
+    />
   );
 }

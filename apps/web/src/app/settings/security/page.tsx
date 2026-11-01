@@ -50,8 +50,23 @@ function PolicyEditor() {
   }, []);
 
   useEffect(() => {
-    if (allowed) void load();
-  }, [allowed, load]);
+    if (!allowed) return;
+    // The permission may be revoked or the editor unmounted during the read.
+    // Never publish a stale response into a different permission context.
+    let active = true;
+    void listSessionPolicies()
+      .then((result) => {
+        if (!active) return;
+        setData(result);
+        setDefaultMinutes(String(result.platformDefaultMinutes));
+      })
+      .catch(() => {
+        if (active) {
+          setError("Could not load session policies. Verify platform settings permission and API availability.");
+        }
+      });
+    return () => { active = false; };
+  }, [allowed]);
 
   const save = async (operation: () => Promise<void>) => {
     setSaving(true);

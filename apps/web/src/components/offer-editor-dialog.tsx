@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  useEffect,
   useState,
 } from "react";
 
@@ -50,7 +49,15 @@ type Props = {
 };
 
 
-export default function OfferEditorDialog({
+function initialMaxInstances(offer: ApplicationOffer | null): string {
+  const deploy = (offer?.entitlements ?? []).find(
+    (item) => item.code === "application.deploy"
+  );
+  const value = deploy?.value as { maxInstances?: number } | null | undefined;
+  return String(value?.maxInstances ?? 1);
+}
+
+function OfferEditorDialogState({
   open,
   applicationId,
   versions,
@@ -66,45 +73,43 @@ export default function OfferEditorDialog({
   const [
     offerKey,
     setOfferKey,
-  ] = useState("");
+  ] = useState(offer?.offerKey ?? "");
 
 
   const [
     name,
     setName,
-  ] = useState("");
+  ] = useState(offer?.name ?? "");
 
 
   const [
     description,
     setDescription,
-  ] = useState("");
+  ] = useState(offer?.description ?? "");
 
 
   const [
     versionPolicy,
     setVersionPolicy,
-  ] = useState(
-    "same_major"
-  );
+  ] = useState(offer?.versionPolicy ?? "same_major");
 
 
   const [
     pinnedVersionId,
     setPinnedVersionId,
-  ] = useState("");
+  ] = useState(offer?.pinnedVersionId ?? "");
 
 
   const [
     autoUpgrade,
     setAutoUpgrade,
-  ] = useState(false);
+  ] = useState(offer?.autoUpgrade ?? false);
 
 
   const [
     maxInstances,
     setMaxInstances,
-  ] = useState("1");
+  ] = useState(() => initialMaxInstances(offer));
 
 
   const [
@@ -125,114 +130,6 @@ export default function OfferEditorDialog({
         version.status ===
         "image_ready"
     );
-
-
-  useEffect(
-    () => {
-
-      if (!open) {
-        return;
-      }
-
-
-      setError("");
-
-
-      if (offer) {
-
-        setOfferKey(
-          offer.offerKey ??
-          ""
-        );
-
-        setName(
-          offer.name ??
-          ""
-        );
-
-        setDescription(
-          offer.description ??
-          ""
-        );
-
-        setVersionPolicy(
-          offer.versionPolicy ??
-          "same_major"
-        );
-
-        setPinnedVersionId(
-          offer.pinnedVersionId ??
-          ""
-        );
-
-        setAutoUpgrade(
-          offer.autoUpgrade ??
-          false
-        );
-
-
-        const deploy =
-          (
-            offer.entitlements ??
-            []
-          ).find(
-            (item) =>
-              item.code ===
-              "application.deploy"
-          );
-
-
-        const value =
-          deploy?.value as
-            | {
-                maxInstances?: number;
-              }
-            | null
-            | undefined;
-
-
-        setMaxInstances(
-          String(
-            value?.maxInstances ??
-            1
-          )
-        );
-
-        // console.log(
-        //   "EDIT OFFER OBJECT:",
-        //   offer
-        // );
-
-        // console.log(
-        //   "EDIT ENTITLEMENTS:",
-        //   offer.entitlements
-        // );
-
-      } else {
-
-        setOfferKey("");
-
-        setName("");
-
-        setDescription("");
-
-        setVersionPolicy(
-          "same_major"
-        );
-
-        setPinnedVersionId("");
-
-        setAutoUpgrade(false);
-
-        setMaxInstances("1");
-      }
-
-    },
-    [
-      open,
-      offer,
-    ]
-  );
 
 
   const handleSave =
@@ -754,5 +651,14 @@ export default function OfferEditorDialog({
       </DialogActions>
 
     </Dialog>
+  );
+}
+// Editor state is scoped to the dialog opening and selected offer, not reset by an effect.
+export default function OfferEditorDialog(props: Props) {
+  return (
+    <OfferEditorDialogState
+      key={`${props.applicationId}:${props.open ? "open" : "closed"}:${props.offer?.id ?? "new"}`}
+      {...props}
+    />
   );
 }

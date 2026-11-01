@@ -78,10 +78,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       };
     }
-    void refreshUser();
+    let active = true;
+    const generation = sessionGeneration.current;
+    void renewAccess()
+      .then(() => api.get<AuthUser>("/api/v1/auth/me"))
+      .then((response) => {
+        if (active && generation === sessionGeneration.current) setUser(response.data);
+      })
+      .catch((error: unknown) => {
+        if (!active || generation !== sessionGeneration.current) return;
+        if (axios.isAxiosError(error) && (error.response?.status === 401 || error.response?.status === 403)) {
+          expireLocal();
+        } else {
+          // An outage is not a revoked session; protected routes remain closed.
+          setUser(null);
+        }
+      })
+      .finally(() => {
+        if (active && generation === sessionGeneration.current) setLoading(false);
+      });
     const onExpired = () => expireLocal();
     window.addEventListener("augmis-auth-expired", onExpired);
     return () => {
+      active = false;
       window.removeEventListener("augmis-auth-expired", onExpired);
       channel.current?.close(); channel.current = null;
     };

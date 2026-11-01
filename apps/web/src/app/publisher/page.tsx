@@ -21,10 +21,6 @@ import {
   Typography,
 } from "@mui/material";
 
-import OfferLifecycleDialog, {
-  OfferLifecycleAction,
-} from "@/components/offer-lifecycle-dialog";
-
 import BuildOutlined
   from "@mui/icons-material/BuildOutlined";
 
@@ -176,7 +172,12 @@ function formatDate(
 
 export default function PublisherPage() {
   const [publisherUsersOpen, setPublisherUsersOpen] = useState(false);
-  const [canManagePublisher, setCanManagePublisher] = useState(false);
+  // Bind the authorization result to the exact publisher for which it was issued.
+  // Do not carry a grant across a publisher switch while the next check is pending.
+  const [publisherManageGrant, setPublisherManageGrant] = useState<{
+    publisherId: string;
+    allowed: boolean;
+  } | null>(null);
 
 
   const [
@@ -835,18 +836,34 @@ const refreshWorkspace =
     setSelectedApplicationId,
   ] = useState("");
 
+  const canManagePublisher = Boolean(
+    selectedPublisherId &&
+    publisherManageGrant?.publisherId === selectedPublisherId &&
+    publisherManageGrant.allowed
+  );
+
   useEffect(() => {
+    if (!selectedPublisherId) return;
     let cancelled = false;
-    setCanManagePublisher(false);
-    if (selectedPublisherId) {
-      void loadMyPublisherPermissions(selectedPublisherId)
-        .then((permissions) => {
-          if (!cancelled) setCanManagePublisher(permissions.includes("publisher.manage"));
-        })
-        .catch(() => {
-          if (!cancelled) setCanManagePublisher(false);
-        });
-    }
+    const requestedPublisherId = selectedPublisherId;
+    void loadMyPublisherPermissions(requestedPublisherId)
+      .then((permissions) => {
+        if (!cancelled) {
+          setPublisherManageGrant({
+            publisherId: requestedPublisherId,
+            allowed: permissions.includes("publisher.manage"),
+          });
+        }
+      })
+      .catch(() => {
+        // Failure is denial, not a cached grant.
+        if (!cancelled) {
+          setPublisherManageGrant({
+            publisherId: requestedPublisherId,
+            allowed: false,
+          });
+        }
+      });
     return () => { cancelled = true; };
   }, [selectedPublisherId]);
 
@@ -857,13 +874,11 @@ const refreshWorkspace =
       selectedPublisherId
   ) ?? null;
 
-  const [
-    workspace,
-    setWorkspace,
-  ] =
-    useState<
-      ApplicationWorkspace | null
-    >(null);
+  const [workspaceSnapshot, setWorkspaceSnapshot] = useState<{
+    applicationId: string; value: ApplicationWorkspace;
+  } | null>(null);
+  const workspace = workspaceSnapshot?.applicationId === selectedApplicationId
+    ? workspaceSnapshot.value : null;
 
 
   const [
@@ -891,58 +906,6 @@ const refreshWorkspace =
 
 
   // =====================================================
-  // LOAD PUBLISHERS
-  // =====================================================
-
-  const loadPublisherContext =
-    useCallback(
-      async () => {
-
-        setLoadingPublishers(
-          true
-        );
-
-        setError("");
-
-        try {
-
-          const result =
-            await loadPublishers();
-
-          setPublishers(
-            result
-          );
-
-          if (
-            result.length > 0
-          ) {
-
-            setSelectedPublisherId(
-              (current) =>
-                current ||
-                result[0].id
-            );
-
-          }
-
-        } catch {
-
-          setError(
-            "Publisher workspaces could not be loaded."
-          );
-
-        } finally {
-
-          setLoadingPublishers(
-            false
-          );
-        }
-      },
-      []
-    );
-
-
-  // =====================================================
   // LOAD APPLICATIONS
   // =====================================================
 
@@ -962,9 +925,7 @@ const refreshWorkspace =
 
         setError("");
 
-        setWorkspace(
-          null
-        );
+        setWorkspaceSnapshot(null);
 
         try {
 
@@ -1029,9 +990,7 @@ const refreshWorkspace =
 
         if (!applicationId) {
 
-          setWorkspace(
-            null
-          );
+          setWorkspaceSnapshot(null);
 
           return;
         }
@@ -1050,9 +1009,7 @@ const refreshWorkspace =
               applicationId
             );
 
-          setWorkspace(
-            result
-          );
+          setWorkspaceSnapshot({ applicationId, value: result });
 
         } catch {
 
@@ -1075,16 +1032,24 @@ const refreshWorkspace =
   // INITIAL PUBLISHER LOAD
   // =====================================================
 
-  useEffect(
-    () => {
-
-      loadPublisherContext();
-
-    },
-    [
-      loadPublisherContext,
-    ]
-  );
+  useEffect(() => {
+    let active = true;
+    void loadPublishers()
+      .then((result) => {
+        if (!active) return;
+        setPublishers(result);
+        if (result.length > 0) {
+          setSelectedPublisherId((current) => current || result[0].id);
+        }
+      })
+      .catch(() => {
+        if (active) setError("Publisher workspaces could not be loaded.");
+      })
+      .finally(() => {
+        if (active) setLoadingPublishers(false);
+      });
+    return () => { active = false; };
+  }, []);
 
 
   // =====================================================
@@ -1118,26 +1083,18 @@ const refreshWorkspace =
   useEffect(
     () => {
 
-      if (
-        selectedApplicationId
-      ) {
-
-        loadWorkspace(
-          selectedApplicationId
-        );
-
-      } else {
-
-        setWorkspace(
-          null
-        );
-      }
-
+      if (!selectedApplicationId) return;
+      let active = true;
+      void loadApplicationWorkspace(selectedApplicationId)
+        .then((result) => {
+          if (active) setWorkspaceSnapshot({ applicationId: selectedApplicationId, value: result });
+        })
+        .catch(() => {
+          if (active) setError("Application versions and offers could not be loaded.");
+        });
+      return () => { active = false; };
     },
-    [
-      selectedApplicationId,
-      loadWorkspace,
-    ]
+    [selectedApplicationId]
   );
 
 
@@ -1266,12 +1223,12 @@ const refreshWorkspace =
                       selectedPublisherId
                     }
 
-                    onChange={
-                      (event) =>
-                        setSelectedPublisherId(
-                          event.target.value
-                        )
-                    }
+                    onChange={(event) => {
+                      // Clear the prior permission grant before switching context.
+                      setPublisherManageGrant(null);
+                      setPublisherUsersOpen(false);
+                      setSelectedPublisherId(event.target.value);
+                    }}
 
                     sx={{
                       minWidth: 230,

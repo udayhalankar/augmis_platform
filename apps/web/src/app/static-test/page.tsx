@@ -5,6 +5,7 @@ import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import axios from "axios";
@@ -91,12 +92,25 @@ function formatStatus(
 }
 
 
+function readDefaultTenantId() {
+  if (typeof window === "undefined") return "";
+  return new URLSearchParams(window.location.search).get("tenantId") ||
+    window.localStorage.getItem(TENANT_STORAGE_KEY) || "";
+}
+function subscribeDefaultTenantId(notify: () => void) {
+  window.addEventListener("storage", notify);
+  window.addEventListener("popstate", notify);
+  return () => {
+    window.removeEventListener("storage", notify);
+    window.removeEventListener("popstate", notify);
+  };
+}
 export default function StaticApplicationTestPage() {
 
-  const [
-    tenantId,
-    setTenantId,
-  ] = useState("");
+  const defaultTenantId = useSyncExternalStore(subscribeDefaultTenantId, readDefaultTenantId, () => "");
+  const [tenantOverride, setTenantOverride] = useState<string | null>(null);
+  const tenantId = tenantOverride ?? defaultTenantId;
+  const setTenantId = setTenantOverride;
 
   const [
     catalog,
@@ -127,28 +141,7 @@ export default function StaticApplicationTestPage() {
   ] = useState("");
 
 
-  useEffect(
-    () => {
 
-      const params =
-        new URLSearchParams(
-          window.location.search
-        );
-
-      const initialTenantId =
-        params.get("tenantId") ||
-        window.localStorage.getItem(
-          TENANT_STORAGE_KEY
-        ) ||
-        "";
-
-      setTenantId(
-        initialTenantId
-      );
-
-    },
-    []
-  );
 
 
   const loadStaticApplications =
@@ -227,21 +220,18 @@ export default function StaticApplicationTestPage() {
     );
 
 
-  useEffect(
-    () => {
-
-      if (tenantId) {
-        loadStaticApplications(
-          tenantId
-        );
-      }
-
-    },
-    [
-      tenantId,
-      loadStaticApplications,
-    ]
-  );
+  useEffect(() => {
+    if (!tenantId) return;
+    let active = true;
+    void loadTenantApplications(tenantId.trim())
+      .then((result) => {
+        if (active) setCatalog(result);
+      })
+      .catch((loadError: unknown) => {
+        if (active) setError(apiError(loadError, "Tenant applications could not be loaded."));
+      });
+    return () => { active = false; };
+  }, [tenantId]);
 
 
   const staticApplications =

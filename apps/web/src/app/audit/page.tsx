@@ -482,6 +482,23 @@ function AuditMetric({
 
 
 export default function AuditPage() {
+  const { selectedTenantId, loading: tenantLoading } = useTenant();
+  const { platformLoading, tenantLoading: permissionLoading,
+    hasPlatformPermission, hasTenantPermission } = usePermissions();
+  const permissions = `${Number(hasPlatformPermission("platform.audit.view"))}:${Number(hasTenantPermission("audit.view"))}`;
+  const [requestedScope, setScope] = useState<AuditScopeType>("platform");
+  const canPlatformAudit = hasPlatformPermission("platform.audit.view");
+  const canTenantAudit = Boolean(selectedTenantId) && hasTenantPermission("audit.view");
+  const effectiveScope = platformLoading || permissionLoading || tenantLoading ? "personal"
+    : requestedScope === "platform" && !canPlatformAudit ? (canTenantAudit ? "tenant" : "personal")
+      : requestedScope === "tenant" && !canTenantAudit ? "personal" : requestedScope;
+  return <AuditScopePage key={`${tenantLoading}:${permissionLoading}:${selectedTenantId}:${permissions}:${effectiveScope}`}
+    requestedScope={requestedScope} setScope={setScope} />;
+}
+
+function AuditScopePage({ requestedScope, setScope }: {
+  requestedScope: AuditScopeType; setScope: (scope: AuditScopeType) => void;
+}) {
 
   const {
     selectedTenant,
@@ -514,13 +531,15 @@ export default function AuditPage() {
     );
 
 
-  const [
-    scope,
-    setScope,
-  ] =
-    useState<AuditScopeType>(
-      "platform"
-    );
+  const permissionLoading = platformLoading || tenantLoading || tenantContextLoading;
+  // Never render or query an unauthorized scope, including during permission refresh.
+  const scope: AuditScopeType = permissionLoading
+    ? "personal"
+    : requestedScope === "platform" && !canPlatformAudit
+      ? (canTenantAudit ? "tenant" : "personal")
+      : requestedScope === "tenant" && !canTenantAudit
+        ? "personal"
+        : requestedScope;
 
 
   const [
@@ -619,11 +638,6 @@ export default function AuditPage() {
     );
 
 
-  const permissionLoading =
-    platformLoading ||
-    tenantLoading ||
-    tenantContextLoading;
-
 
   // Step 54: export of *applied* filters, not just the visible page.
   const [exportBusy, setExportBusy] = useState<AuditEvidenceFormat | null>(null);
@@ -658,58 +672,8 @@ export default function AuditPage() {
   };
 
 
-  /*
-   * ----------------------------------------------------------
-   * Keep privileged scopes fail-closed.
-   *
-   * Personal scope is always available to an authenticated
-   * user. If tenant/platform permission disappears while this
-   * page is open, return to personal scope.
-   * ----------------------------------------------------------
-   */
+  // Scope is derived above; never synchronize permission fallback by an effect.
 
-  useEffect(
-    () => {
-
-      if (
-        permissionLoading
-      ) {
-
-        return;
-      }
-
-      if (
-        scope === "platform" &&
-        !canPlatformAudit
-      ) {
-
-        setScope(
-          canTenantAudit
-            ? "tenant"
-            : "personal"
-        );
-
-        return;
-      }
-
-      if (
-        scope === "tenant" &&
-        !canTenantAudit
-      ) {
-
-        setScope(
-          "personal"
-        );
-      }
-
-    },
-    [
-      permissionLoading,
-      scope,
-      canPlatformAudit,
-      canTenantAudit,
-    ]
-  );
 
 
   /*
@@ -1232,28 +1196,54 @@ export default function AuditPage() {
     );
 
 
-  useEffect(
-    () => {
+  useEffect(() => {
+    if (permissionLoading) return;
+    if (scope === "platform" && !canPlatformAudit) return;
+    if (scope === "tenant" && (!canTenantAudit || !selectedTenantId)) return;
+    let active = true;
+    const request = scope === "personal" ? loadMyAuditFilterOptions() :
+      scope === "platform" ? loadPlatformAuditFilterOptions() :
+      loadTenantAuditFilterOptions(selectedTenantId);
+    void request.then((result) => {
+      if (active) setFilterOptions(result);
+    }).catch((failure: unknown) => {
+      if (active) setError(apiError(failure, "Audit filter options could not be loaded."));
+    });
+    return () => { active = false; };
+  }, [permissionLoading, scope, canPlatformAudit, canTenantAudit, selectedTenantId]);
 
-      void loadOptions();
 
-    },
-    [
-      loadOptions,
-    ]
-  );
-
-
-  useEffect(
-    () => {
-
-      void loadEvents();
-
-    },
-    [
-      loadEvents,
-    ]
-  );
+  useEffect(() => {
+    if (permissionLoading) return;
+    if (scope === "platform" && !canPlatformAudit) return;
+    if (scope === "tenant" && (!canTenantAudit || !selectedTenantId)) return;
+    let active = true;
+    const base = toApiFilters(appliedFilters);
+    const mainFilters: AuditEventFilters = { ...base, limit: rowsPerPage, offset: page * rowsPerPage };
+    const summaryBase: AuditEventFilters = { ...base, outcome: undefined, limit: 1, offset: 0 };
+    const run = (filters: AuditEventFilters) => scope === "personal"
+      ? loadMyAuditEvents(filters)
+      : scope === "platform"
+        ? loadPlatformAuditEvents(filters)
+        : loadTenantAuditEvents(selectedTenantId, filters);
+    void Promise.all([
+      run(mainFilters), run(summaryBase),
+      run({ ...summaryBase, outcome: "success" }),
+      run({ ...summaryBase, outcome: "failed" }),
+    ]).then(([mainResult, totalResult, successResult, failedResult]) => {
+      if (!active) return;
+      setEvents(mainResult.items);
+      setTotal(mainResult.pagination.total);
+      setSummary({ total: totalResult.pagination.total,
+        success: successResult.pagination.total, failed: failedResult.pagination.total });
+    }).catch((failure: unknown) => {
+      if (!active) return;
+      setEvents([]); setTotal(0); setSummary({ total: 0, success: 0, failed: 0 });
+      setError(apiError(failure, "Audit events could not be loaded."));
+    });
+    return () => { active = false; };
+  }, [permissionLoading, scope, canPlatformAudit, canTenantAudit,
+      selectedTenantId, appliedFilters, rowsPerPage, page]);
 
 
   /*

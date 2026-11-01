@@ -64,25 +64,20 @@ export default function EmailSettingsPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  const load = async () => {
-    setError("");
-
-    try {
-      setSettings(
-        await loadPlatformEmailSettings()
-      );
-    } catch (loadError) {
-      setError(
-        apiError(
-          loadError,
-          "Email settings could not be loaded."
-        )
-      );
-    }
-  };
-
+  // The initial read is an external synchronization. Commit its result only
+  // when the request settles; ignore responses after navigation/unmount.
   useEffect(() => {
-    void load();
+    let active = true;
+    void loadPlatformEmailSettings()
+      .then((result) => {
+        if (active) setSettings(result);
+      })
+      .catch((loadError: unknown) => {
+        if (active) {
+          setError(apiError(loadError, "Email settings could not be loaded."));
+        }
+      });
+    return () => { active = false; };
   }, []);
 
   const applyProvider = (

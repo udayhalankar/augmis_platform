@@ -135,7 +135,7 @@ export default function RbacPage() {
     loading,
     setLoading,
   ] =
-    useState(false);
+    useState(true);
 
 
   const [
@@ -231,24 +231,40 @@ export default function RbacPage() {
     );
 
 
-  useEffect(
-    () => {
+  useEffect(() => {
+    let active = true;
+    // Keep the explicit loadData callback for user-initiated Refresh.
+    // Initial and scope-change loads do not synchronously mutate React state.
+    void Promise.all([
+      loadRbacRoles(scope),
+      loadRbacPermissions(scope),
+    ])
+      .then(([roleRows, permissionRows]) => {
+        if (!active) return;
+        setRoles(roleRows);
+        setPermissions(permissionRows);
+      })
+      .catch((loadError: unknown) => {
+        if (!active) return;
+        setRoles([]);
+        setPermissions([]);
+        setError(apiError(loadError, "RBAC configuration could not be loaded."));
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [scope]);
 
-      setSelectedRole(
-        null
-      );
-
-      setMessage("");
-
-      void loadData(
-        scope
-      );
-    },
-    [
-      scope,
-      loadData,
-    ]
-  );
+  const changeScope = (nextScope: RbacScope) => {
+    if (nextScope === scope) return;
+    // Reset the scoped editor synchronously with the actual user selection.
+    setSelectedRole(null);
+    setMessage("");
+    setError("");
+    setLoading(true);
+    setScope(nextScope);
+  };
 
 
   const sortedPermissions =
@@ -447,7 +463,7 @@ export default function RbacPage() {
                   { value: "platform", label: "Platform" },
                 ]}
                 ariaLabel="RBAC security scopes"
-                onChange={(value) => setScope(value as RbacScope)}
+                onChange={(value) => changeScope(value as RbacScope)}
                 action={
                   <Button variant="outlined" startIcon={<RefreshOutlined />} disabled={loading} onClick={() => void loadData(scope)}>
                     Refresh

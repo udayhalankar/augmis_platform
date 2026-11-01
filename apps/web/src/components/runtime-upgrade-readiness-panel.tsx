@@ -29,7 +29,7 @@ function detail(err: unknown): string {
   return err instanceof Error ? err.message : "Could not read the upgrade setting.";
 }
 
-export default function RuntimeUpgradeReadinessPanel({ instanceId }: { instanceId: string }) {
+function RuntimeUpgradeReadinessPanelState({ instanceId }: { instanceId: string }) {
   const [readiness, setReadiness] = useState<RuntimeUpgradeReadiness | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -49,7 +49,6 @@ export default function RuntimeUpgradeReadinessPanel({ instanceId }: { instanceI
 
   useEffect(() => {
     let active = true;
-    setLoading(true); setReadiness(null); setError(""); setNotice("");
     void getRuntimeUpgradeReadiness(instanceId)
       .then((result) => { if (active) setReadiness(result); })
       .catch((err) => { if (active) setError(detail(err)); })
@@ -106,4 +105,9 @@ export default function RuntimeUpgradeReadinessPanel({ instanceId }: { instanceI
       </Typography>
     </>}
   </Paper>;
+}
+
+// Changing instances creates a fresh readiness session; the effect only handles the remote read.
+export default function RuntimeUpgradeReadinessPanel({ instanceId }: { instanceId: string }) {
+  return <RuntimeUpgradeReadinessPanelState key={instanceId} instanceId={instanceId} />;
 }

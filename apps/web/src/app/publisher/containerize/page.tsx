@@ -115,7 +115,7 @@ export default function ContainerizeSourcePage() {
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [releaseIssue, setReleaseIssue] = useState("");
   const [submitted, setSubmitted] = useState(false);
-  const [qualificationAutoChecking, setQualificationAutoChecking] = useState(false);
+  const [qualificationPollStopped, setQualificationPollStopped] = useState(false);
   const [qualificationAutoTimedOut, setQualificationAutoTimedOut] = useState(false);
   // Shared between automatic polling and the existing manual Refresh button.
   const releaseReviewInFlight = useRef(false);
@@ -123,7 +123,7 @@ export default function ContainerizeSourcePage() {
 
   function resetRelease() {
     setRegistered(null); setReleaseReview(null); setReleaseIssue(""); setSubmitted(false);
-    setQualificationAutoChecking(false); setQualificationAutoTimedOut(false);
+    setQualificationPollStopped(false); setQualificationAutoTimedOut(false);
   }
 
 
@@ -395,10 +395,11 @@ export default function ContainerizeSourcePage() {
   // Poll the EXISTING read-only review endpoint until the worker finishes. Never run the
   // worker, modify evidence, mark an unverified result Passed, or auto-submit a draft.
   const qualificationFinished = Boolean(releaseReview?.eligible || releaseReview?.status === "failed");
+  const qualificationAutoChecking = Boolean(registered?.buildId && passedPreflight &&
+    !submitted && !qualificationFinished && !qualificationPollStopped);
   useEffect(() => {
     const draft = registered;
-    if (!draft?.buildId || !passedPreflight || submitted || qualificationFinished) {
-      setQualificationAutoChecking(false);
+    if (!draft?.buildId || !passedPreflight || submitted || qualificationFinished || qualificationPollStopped) {
       return;
     }
 
@@ -408,8 +409,6 @@ export default function ContainerizeSourcePage() {
     const revision = draftRevision.current;
     const intervalMs = 4000;
     const maxChecks = 75; // Five minutes; manual refresh remains available afterward.
-    setQualificationAutoChecking(true);
-    setQualificationAutoTimedOut(false);
 
     const scheduleNext = () => {
       if (active && revision === draftRevision.current) {
@@ -423,7 +422,7 @@ export default function ContainerizeSourcePage() {
         // A manual review is in flight. Respect the bounded polling window.
         checksMade += 1;
         if (checksMade >= maxChecks) {
-          setQualificationAutoChecking(false);
+          setQualificationPollStopped(true);
           setQualificationAutoTimedOut(true);
         } else scheduleNext();
         return;
@@ -442,14 +441,14 @@ export default function ContainerizeSourcePage() {
           (result.qualificationStatus === "pending_smoke" ||
            result.qualificationStatus === "not_started");
         if (!pending) {
-          setQualificationAutoChecking(false);
+          setQualificationPollStopped(true);
           return;
         }
       } catch (failure: unknown) {
         if (active && revision === draftRevision.current) {
           setReleaseReview(null);
           setReleaseIssue(releaseError(failure));
-          setQualificationAutoChecking(false);
+          setQualificationPollStopped(true);
         }
         return; // Auth, integrity and network errors are not silently retried.
       } finally {
@@ -458,7 +457,7 @@ export default function ContainerizeSourcePage() {
       checksMade += 1;
       if (!active || revision !== draftRevision.current) return;
       if (checksMade >= maxChecks) {
-        setQualificationAutoChecking(false);
+        setQualificationPollStopped(true);
         setQualificationAutoTimedOut(true);
         return;
       }
@@ -470,7 +469,7 @@ export default function ContainerizeSourcePage() {
       active = false; // Never apply a late response to another draft or an unmounted page.
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [registered, passedPreflight, submitted, qualificationFinished]);
+  }, [registered, passedPreflight, submitted, qualificationFinished, qualificationPollStopped]);
 
   const checks = report?.checks.map((c) => {
     if (releaseReview && c.id === "qualification") {

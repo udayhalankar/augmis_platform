@@ -602,28 +602,6 @@ function blockedMethodResponse():
   );
 }
 
-function isLocalDevelopmentHostname(
-  hostname: string
-): boolean {
-
-  const value =
-    String(hostname || "")
-      .trim()
-      .toLowerCase();
-
-
-  return (
-    value === "localhost" ||
-    value.endsWith(
-      ".localhost"
-    ) ||
-    value === "127.0.0.1" ||
-    value === "::1" ||
-    value === "[::1]"
-  );
-}
-
-
 function getUpstreamSetCookieHeaders(
   response: Response
 ): string[] {

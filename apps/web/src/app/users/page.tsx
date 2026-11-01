@@ -290,6 +290,14 @@ function hasTenantOwnerRole(
 
 
 export default function UsersPage() {
+  const { selectedTenantId, loading: tenantLoading } = useTenant();
+  const { tenantLoading: permissionLoading, hasTenantPermission } = usePermissions();
+  const permissionKey = permissionLoading ? "pending" :
+    `${Number(hasTenantPermission("tenant.users.view"))}:${Number(hasTenantPermission("tenant.users.manage"))}`;
+  return <UsersScopeView key={`${tenantLoading}:${selectedTenantId}:${permissionKey}`} />;
+}
+
+function UsersScopeView() {
   const {
     user,
   } = useAuth();
@@ -573,87 +581,26 @@ export default function UsersPage() {
     );
 
 
-   useEffect(
-    () => {
+  useEffect(() => {
+    if (tenantLoading || permissionLoading || !selectedTenantId || !canViewUsers) return;
+    let active = true;
+    void Promise.all([
+      loadTenantUsers(selectedTenantId),
+      loadTenantRoles(selectedTenantId),
+      canManageUsers ? loadTenantInvitations(selectedTenantId) : Promise.resolve([]),
+    ]).then(([members, tenantRoles, tenantInvites]) => {
+      if (!active) return;
+      setMemberships(members);
+      setRoles(tenantRoles);
+      setInvitations(tenantInvites);
+    }).catch((loadError: unknown) => {
+      if (active) setError(apiError(loadError, "Tenant users could not be loaded."));
+    });
+    return () => { active = false; };
+  }, [tenantLoading, permissionLoading, selectedTenantId, canViewUsers, canManageUsers]);
 
-      if (
-        tenantLoading ||
-        permissionLoading
-      ) {
-        return;
-      }
+  // Privileged dialogs are keyed by the effective permission set above.
 
-
-      setSearch("");
-      setMessage("");
-      setError("");
-
-      setAddDialogOpen(false);
-      setInviteDialogOpen(false);
-
-      setCreatedInvitation(
-        null
-      );
-
-      setRoleTarget(
-        null
-      );
-
-
-      if (
-        !selectedTenantId ||
-        !canViewUsers
-      ) {
-
-        setMemberships([]);
-        setRoles([]);
-        setInvitations([]);
-
-        return;
-      }
-
-
-      void loadData(
-        selectedTenantId
-      );
-    },
-    [
-      tenantLoading,
-      permissionLoading,
-      selectedTenantId,
-      canViewUsers,
-      loadData,
-    ]
-  );
-
-    useEffect(
-    () => {
-
-      /*
-       * If permissions change while a
-       * management dialog is open, close
-       * the privileged interaction.
-       */
-
-      if (!canManageUsers) {
-
-        setAddDialogOpen(false);
-
-        setInviteDialogOpen(false);
-
-        setCreatedInvitation(
-          null
-        );
-
-        setRoleTarget(
-          null
-        );
-      }
-    },
-    [
-      canManageUsers,
-    ]
-  );
 
 
   const filteredMemberships =
@@ -781,10 +728,6 @@ export default function UsersPage() {
 
   useEffect(() => {
     let ignore = false;
-    setOrgPublisher(null);
-    setPublisherAccess(false);
-    setPublisherDialogOpen(false);
-    setPublisherError("");
     if (!selectedTenantId || !canManageUsers) return () => { ignore = true; };
     const fetchPublisher = async () => {
       try {

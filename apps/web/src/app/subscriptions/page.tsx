@@ -139,6 +139,11 @@ function statusColor(
 
 
 export default function SubscriptionsPage() {
+  const { selectedTenantId, loading } = useTenant();
+  return <SubscriptionsTenantView key={`${loading}:${selectedTenantId}`} />;
+}
+
+function SubscriptionsTenantView() {
 
   const {
   selectedTenant,
@@ -319,59 +324,18 @@ useEffect(
 );
 
 
- useEffect(
-  () => {
-
-    if (
-      tenantLoading
-    ) {
-      return;
-    }
-
-
-    if (
-      !selectedTenantId
-    ) {
-
-      setSubscriptions(
-        []
-      );
-
-      return;
-    }
+ useEffect(() => {
+   if (tenantLoading || !selectedTenantId) return;
+   let active = true;
+   void loadTenantSubscriptions(selectedTenantId)
+     .then((rows) => { if (active) setSubscriptions(rows); })
+     .catch((loadError: unknown) => {
+       if (active) setError(apiError(loadError, "Subscriptions could not be loaded."));
+     });
+   return () => { active = false; };
+ }, [tenantLoading, selectedTenantId]);
 
 
-    setMessage(
-      ""
-    );
-
-    setError(
-      ""
-    );
-
-
-    loadSubscriptions(
-      selectedTenantId
-    );
-
-  },
-  [
-    tenantLoading,
-    selectedTenantId,
-    loadSubscriptions,
-  ]
-);
-
-
-  useEffect(() => {
-    changeOfferRequestId.current += 1;
-    setChangeOfferTarget(null);
-    setChangeOfferTenantId("");
-    setChangeOfferOptions([]);
-    setChangeOfferSelection("");
-    setChangeOfferError("");
-    setChangeOfferLoading(false);
-  }, [selectedTenantId]);
 
   const openChangeOffer = async (subscription: TenantSubscriptionSummary) => {
     if (!selectedTenantId || busyId) return;
@@ -1140,7 +1104,7 @@ useEffect(
             )}
 
             <Alert severity="warning" sx={{ mt: 2 }}>
-              Confirming changes this existing subscription's commercial policy and
+              Confirming changes this existing subscription&apos;s commercial policy and
               entitlement snapshot. The backend checks running-instance compatibility.
               It does not upgrade, restart, or create an application instance.
             </Alert>

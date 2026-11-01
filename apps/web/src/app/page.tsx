@@ -87,7 +87,7 @@ export default function Home() {
     loading,
     setLoading,
   ] =
-    useState(false);
+    useState(true);
 
 
   const [
@@ -127,20 +127,24 @@ export default function Home() {
     );
 
 
-  useEffect(
-    () => {
-
-      if (user) {
-
-        loadDashboard();
-      }
-
-    },
-    [
-      user,
-      loadDashboard,
-    ]
-  );
+  // Initial read: keep the explicit loadDashboard callback for Refresh/Retry.
+  // Do not synchronously set state from an effect and do not commit stale data
+  // if authentication changes while the read is in flight.
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    void loadControlCenterData()
+      .then((result) => {
+        if (active) setData(result);
+      })
+      .catch(() => {
+        if (active) setError("The Control Center could not load platform data.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [user]);
 
 
   const metrics =

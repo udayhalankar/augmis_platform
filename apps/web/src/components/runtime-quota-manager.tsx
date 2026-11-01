@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import axios from "axios";
 import { Alert, Box, Button, Paper, TextField, Typography } from "@mui/material";
 import { updateRuntimeQuota, type RuntimeQuota } from "@/lib/runtime-control";
@@ -15,18 +15,12 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : "Unable to change the runtime quota.";
 }
 
-export default function RuntimeQuotaManager({ tenantId, quota, onSaved }: Props) {
+function RuntimeQuotaManagerState({ tenantId, quota, onSaved }: Props) {
   const [editing, setEditing] = useState(false);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(quota?.maxRunningContainers == null ? "" : String(quota.maxRunningContainers));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-
-  useEffect(() => {
-    setEditing(false);
-    setInput(quota?.maxRunningContainers == null ? "" : String(quota.maxRunningContainers));
-    setError(""); setNotice("");
-  }, [tenantId, quota?.maxRunningContainers]);
 
   const parsed = Number(input);
   const valid = /^\d+$/.test(input) && Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 1000;
@@ -68,4 +62,14 @@ export default function RuntimeQuotaManager({ tenantId, quota, onSaved }: Props)
       <Button variant="outlined" disabled={busy} onClick={() => { setEditing(false); setError(""); }}>Cancel</Button>
     </Box>}
   </Paper>;
+}
+
+// A tenant/quota revision is a distinct editing session, not an effect-driven reset.
+export default function RuntimeQuotaManager(props: Props) {
+  return (
+    <RuntimeQuotaManagerState
+      key={`${props.tenantId}:${props.quota?.maxRunningContainers ?? "unset"}`}
+      {...props}
+    />
+  );
 }

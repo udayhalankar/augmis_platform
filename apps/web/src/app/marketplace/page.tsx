@@ -42,6 +42,8 @@ import RefreshOutlined
 import SearchOutlined
   from "@mui/icons-material/SearchOutlined";
 
+import { useTenant } from "@/context/tenant-context";
+
 import AppShell
   from "@/components/app-shell";
 
@@ -207,11 +209,7 @@ export default function MarketplacePage() {
     >(null);
 
 
-  const [
-    tenantId,
-    setTenantId,
-  ] =
-    useState("");
+  const { selectedTenantId: tenantId } = useTenant();
 
 
   const [
@@ -221,27 +219,7 @@ export default function MarketplacePage() {
     useState(false);
 
 
-  useEffect(
-    () => {
 
-      const saved =
-        window.localStorage.getItem(
-          TENANT_STORAGE_KEY
-        );
-
-
-      if (
-        saved
-      ) {
-
-        setTenantId(
-          saved
-        );
-      }
-
-    },
-    []
-  );
 
 
   const loadMarketplace =
@@ -284,16 +262,22 @@ export default function MarketplacePage() {
     );
 
 
-  useEffect(
-    () => {
-
-      loadMarketplace();
-
-    },
-    [
-      loadMarketplace,
-    ]
-  );
+  // Initial catalogue synchronization: the component starts in loading state.
+  // Keep the explicit loadMarketplace callback for user-initiated refreshes.
+  useEffect(() => {
+    let active = true;
+    void loadMarketplaceOffers()
+      .then((result) => {
+        if (active) setOffers(result);
+      })
+      .catch(() => {
+        if (active) setError("Marketplace offers could not be loaded.");
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, []);
 
 
   const filteredOffers =
@@ -859,20 +843,14 @@ export default function MarketplacePage() {
                 tenantId
               }
 
-              onChange={
-                (event) =>
-                  setTenantId(
-                    event.target
-                      .value
-                  )
-              }
+              slotProps={{ input: { readOnly: true } }}
 
               fullWidth
 
               required
 
               helperText=
-                "Temporary Step 3B input. This will be replaced with the platform tenant selector."
+                "Tenant is selected using the global AUGMIS tenant selector."
             />
 
           </DialogContent>

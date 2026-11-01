@@ -6,7 +6,7 @@ import DeleteOutlineOutlinedIcon from "@mui/icons-material/DeleteOutlineOutlined
 import RestartAltOutlinedIcon from "@mui/icons-material/RestartAltOutlined";
 import {
   Alert, Autocomplete, Box, Button, Checkbox, Chip, Dialog, DialogActions, DialogContent,
-  DialogTitle, Divider, IconButton, MenuItem, TextField, Tooltip, Typography,
+  DialogTitle, Divider, IconButton, TextField, Tooltip, Typography,
 } from "@mui/material";
 import { RUNTIME_CONFIG_PROFILES, RUNTIME_VARIABLE_CATALOG,
   type RuntimeVariableTemplate } from "@/lib/runtime-variable-catalog";

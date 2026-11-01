@@ -2,10 +2,13 @@
 
 "use client";
 
+import { useRouter } from "next/navigation";
+
 import {
   useEffect,
   useMemo,
   useState,
+  useSyncExternalStore,
 } from "react";
 
 import axios from "axios";
@@ -102,7 +105,10 @@ function formatDate(
 }
 
 
+function subscribeBrowserReady() { return () => undefined; }
+
 export default function InvitationAcceptPage() {
+  const router = useRouter();
   const {
     user,
     loading: authLoading,
@@ -186,70 +192,40 @@ export default function InvitationAcceptPage() {
           ) || ""
         ).trim();
 
-      setToken(
-        inviteToken
-      );
 
-      if (
-        !inviteToken
-      ) {
-        setLoading(
-          false
-        );
+      if (!inviteToken) return;
 
-        setError(
-          "The invitation link is missing its token."
-        );
-
-        return;
-      }
-
-      const load =
-        async () => {
-          setLoading(
-            true
-          );
-
-          setError(
-            ""
-          );
-
-          try {
-            const result =
-              await resolveTenantInvitation(
-                inviteToken
-              );
-
-            setInvitation(
-              result
-            );
-
-          } catch (
-            loadError
-          ) {
-            setInvitation(
-              null
-            );
-
-            setError(
-              apiError(
-                loadError,
-                "The invitation could not be loaded."
-              )
-            );
-
-          } finally {
-            setLoading(
-              false
-            );
-          }
-        };
-
-      void load();
+      let active = true;
+      void resolveTenantInvitation(inviteToken)
+        .then((result) => {
+          if (!active) return;
+          setToken(inviteToken);
+          setInvitation(result);
+        })
+        .catch((loadError: unknown) => {
+          if (!active) return;
+          setInvitation(null);
+          setError(apiError(loadError, "The invitation could not be loaded."));
+        })
+        .finally(() => {
+          if (active) setLoading(false);
+        });
+      return () => { active = false; };
     },
     []
   );
 
+
+  // Stable server snapshot prevents a missing-token hydration mismatch.
+  const browserReady = useSyncExternalStore(
+    subscribeBrowserReady, () => true, () => false,
+  );
+  const missingToken = browserReady && !token &&
+    !new URLSearchParams(window.location.search).get("token")?.trim();
+  const invitationLoading = loading && !missingToken;
+  const invitationError = missingToken
+    ? "The invitation link is missing its token."
+    : error;
 
   const signedInEmailMatches =
     useMemo(
@@ -462,7 +438,7 @@ export default function InvitationAcceptPage() {
 
   const goToAUGMIS =
     () => {
-      window.location.assign(
+      router.push(
         "/tenants"
       );
     };
@@ -580,7 +556,7 @@ export default function InvitationAcceptPage() {
             },
           }}
         >
-          {loading ||
+          {invitationLoading ||
           authLoading ? (
             <Box
               sx={{
@@ -678,12 +654,12 @@ export default function InvitationAcceptPage() {
                 Continue to AUGMIS
               </Button>
             </Box>
-          ) : error &&
+          ) : invitationError &&
               !invitation ? (
             <Alert
               severity="error"
             >
-              {error}
+              {invitationError}
             </Alert>
           ) : invitation ? (
             <>

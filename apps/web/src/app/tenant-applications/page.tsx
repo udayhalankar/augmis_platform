@@ -87,6 +87,11 @@ function formatStatus(
 
 
 export default function TenantApplicationsPage() {
+  const { selectedTenantId, loading } = useTenant();
+  return <TenantApplicationsView key={`${loading}:${selectedTenantId}`} />;
+}
+
+function TenantApplicationsView() {
   const {
     selectedTenant,
     selectedTenantId,
@@ -197,36 +202,17 @@ export default function TenantApplicationsPage() {
   );
 
 
-  /*
-   * Automatically reload applications whenever the
-   * global tenant selection changes.
-   */
-  useEffect(
-    () => {
-      if (tenantLoading) {
-        return;
-      }
-
-      if (!selectedTenantId) {
-        setCatalog(null);
-        setSearch("");
-        setError("");
-        return;
-      }
-
-      setSearch("");
-      setError("");
-
-      loadCatalog(
-        selectedTenantId
-      );
-    },
-    [
-      tenantLoading,
-      selectedTenantId,
-      loadCatalog,
-    ]
-  );
+  // Each tenant view is keyed, so old catalog rows never survive tenant changes.
+  useEffect(() => {
+    if (tenantLoading || !selectedTenantId) return;
+    let active = true;
+    void loadTenantApplications(selectedTenantId)
+      .then((result) => { if (active) setCatalog(result); })
+      .catch((loadError: unknown) => {
+        if (active) setError(apiError(loadError, "Tenant applications could not be loaded."));
+      });
+    return () => { active = false; };
+  }, [tenantLoading, selectedTenantId]);
 
 
   const filteredItems =

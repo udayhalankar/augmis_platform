@@ -7,13 +7,11 @@ const eslintConfig = defineConfig([
   ...nextVitals,
   ...nextTs,
 
-  // AUGMIS B3 temporary CI compatibility.
-  // Retain diagnostics as warnings while existing
-  // React effects are refactored safely.
+  // R09: preserve React rules as errors, not warnings or suppressions.
   {
     rules: {
-      "react-hooks/set-state-in-effect": "warn",
-      "react/no-unescaped-entities": "warn",
+      "react-hooks/set-state-in-effect": "error",
+      "react/no-unescaped-entities": "error",
     },
   },
 

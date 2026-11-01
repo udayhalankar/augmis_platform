@@ -4,7 +4,6 @@
 import {
   ChangeEvent,
   MouseEvent,
-  useEffect,
   useState,
 } from "react";
 
@@ -208,7 +207,7 @@ function extractApiError(
 }
 
 
-export default function ApplicationUploadDialog({
+function ApplicationUploadDialogState({
   open,
   publisherId,
   publisherName,
@@ -290,53 +289,6 @@ export default function ApplicationUploadDialog({
     useState<
       ApplicationUploadResult | null
     >(null);
-
-
-  useEffect(
-    () => {
-
-      if (open) {
-
-        setMode(
-          "aaps"
-        );
-
-        setFile(
-          null
-        );
-
-        setAppName(
-          ""
-        );
-
-        setAppKey(
-          ""
-        );
-
-        setAppKeyTouched(
-          false
-        );
-
-        setVersion(
-          "1.0.0"
-        );
-
-        setDescription(
-          ""
-        );
-
-        setError(
-          ""
-        );
-
-        setResult(
-          null
-        );
-      }
-
-    },
-    [open]
-  );
 
 
   const handleClose =
@@ -1421,5 +1373,15 @@ function ResultRow({
       </Typography>
 
     </Box>
+  );
+}
+
+// Reset the upload form by React identity when the dialog opens or changes publisher.
+export default function ApplicationUploadDialog(props: ApplicationUploadDialogProps) {
+  return (
+    <ApplicationUploadDialogState
+      key={`${props.publisherId}:${props.open ? "open" : "closed"}`}
+      {...props}
+    />
   );
 }
