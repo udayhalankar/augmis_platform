@@ -1,0 +1,6 @@
+# R10 Python 3.12 CI dependencies. Compile a hash-locked requirements-ci.lock.
+# The source requirements.txt remains the application's runtime dependency contract.
+-r requirements.txt
+pytest==9.0.2
+pip-audit==2.10.1
+httpx==0.28.1
