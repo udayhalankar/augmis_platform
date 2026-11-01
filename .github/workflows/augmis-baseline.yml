@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Only generates a *candidate* reproducible lock for manual review/commit.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -11,34 +13,63 @@ permissions:
 jobs:
   backend-static:
     name: Backend syntax and runtime source contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Compile Python code
-        run: python -m compileall -q services/api/app tools
+      - name: Compile Python code and migration revisions
+        run: python -m compileall -q services/api/app services/api/alembic tools
       - name: Runtime source inventory
         run: python -m tools.b0b1_runtime_inventory --ci
+
   frontend-build:
     name: Frontend types and build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults:
       run:
         working-directory: apps/web
     env:
       NEXT_PUBLIC_API_BASE_URL: http://127.0.0.1:8001
+      NEXT_TELEMETRY_DISABLED: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      - name: Verify reproducible npm install is available
+          node-version: '22.16.0'
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Check npm lockfile present
         run: test -f package-lock.json
-      - name: Install dependencies
+      - name: Install exact Node lockfile
         run: npm ci
-      - name: TypeScript
-        run: npx tsc --noEmit
+      - name: Generate Next.js route types
+        run: npx next typegen
+      - name: TypeScript (including generated types)
+        run: npx tsc --noEmit --project tsconfig.json
       - name: Next.js production build
         run: npm run build
+
+  # Creates an artifact only. NEVER commits, pushes or updates a dependency silently.
+  python-lock-candidate:
+    name: R10 Python lock candidate (not required)
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Pin lock compiler
+        run: python -m pip install 'pip-tools==7.6.2'
+      - name: Compile full transitive Python CI lock with hashes
+        run: python -m piptools compile --generate-hashes --no-emit-index-url --no-emit-trusted-host --resolver=backtracking --output-file=requirements-ci.lock requirements-ci.in
+      - name: Verify lock syntax and hashes
+        run: python -m tools.r10_ci_checks verify-lock
+      - uses: actions/upload-artifact@v4
+        with:
+          name: augmis-r10-python312-lock-candidate
+          path: requirements-ci.lock
+          if-no-files-found: error
+          retention-days: 7
