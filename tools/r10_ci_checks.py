@@ -32,26 +32,40 @@ def verify_lock() -> None:
         s = line.strip()
         if s.startswith(("--index-url", "--extra-index-url", "--trusted-host", "-r ", "-c ", "-e ")):
             raise R10CheckError("R10_LOCK_UNSAFE_DIRECTIVE")
-    sections = list(re.finditer(r"(?m)^([a-zA-Z0-9][a-zA-Z0-9._-]*)==([^\s\\]+)", value))
+    # pip-compile v7 retains requested extras by default, e.g. uvicorn[standard]==X.Y.
+    # Parse the full pinned requirement, not only the characters before `==`.
+    # Require an exact version and SHA-256 hash for each distribution.
+    sections = list(re.finditer(
+        r"(?m)^([a-zA-Z0-9][a-zA-Z0-9._-]*)(?:\[([a-zA-Z0-9._,-]+)\])?==([^\s\\]+)(?=\s|\\|$)",
+        value,
+    ))
     if not sections:
         raise R10CheckError("R10_LOCK_EMPTY")
     pinned = {}
     for i, match in enumerate(sections):
-        package = canonicalize_name(match.group(1))
-        version = match.group(2)
+        parsed = Requirement(match.group(0))
+        package = canonicalize_name(parsed.name)
+        version = match.group(3)
         if package in pinned:
             raise R10CheckError("R10_LOCK_DUPLICATE_PIN: " + package)
         chunk = value[match.end():sections[i + 1].start() if i + 1 < len(sections) else len(value)]
         if not re.search(r"--hash=sha256:[a-f0-9]{64}", chunk):
             raise R10CheckError("R10_LOCK_PACKAGE_MISSING_HASH: " + package)
-        pinned[package] = Version(version)
+        pinned[package] = (
+            Version(version),
+            frozenset(canonicalize_name(extra) for extra in parsed.extras),
+        )
     for line in (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         requirement = Requirement(line)
         key = canonicalize_name(requirement.name)
-        if key not in pinned or pinned[key] not in requirement.specifier:
+        locked = pinned.get(key)
+        required_extras = {canonicalize_name(extra) for extra in requirement.extras}
+        if (locked is None
+                or locked[0] not in requirement.specifier
+                or not required_extras.issubset(locked[1])):
             raise R10CheckError("R10_LOCK_ROOT_REQUIREMENT_DRIFT: " + key)
     for package in ("pytest", "pip-audit", "httpx"):
         if canonicalize_name(package) not in pinned:
